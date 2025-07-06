@@ -1,104 +1,218 @@
 package com.totgb.zazzproxy;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.EdgeToEdge;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
+import androidx.appcompat.app.AppCompatDelegate;
+import androidx.core.view.GravityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.viewpager.widget.ViewPager;
 
 public class MainActivity extends AppCompatActivity {
     private boolean isServerMode = true;
     private TextView statusText;
     private TextView logText;
+    private DrawerLayout drawerLayout;
+
+    private float startX;
+    private float endX;
+    private static final int SWIPE_THRESHOLD = 150;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         EdgeToEdge.enable(this);
+        // Enable light/dark mode auto
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM);
 
-        // Root layout
-        LinearLayout rootLayout = new LinearLayout(this);
-        rootLayout.setOrientation(LinearLayout.VERTICAL);
-        rootLayout.setPadding(32, 32, 32, 32);
-        rootLayout.setGravity(Gravity.CENTER_HORIZONTAL);
+        // DrawerLayout root
+        drawerLayout = new DrawerLayout(this);
+        drawerLayout.setLayoutParams(new DrawerLayout.LayoutParams(
+                DrawerLayout.LayoutParams.MATCH_PARENT, DrawerLayout.LayoutParams.MATCH_PARENT));
+
+        // FrameLayout to overlay menu icon on top left
+        FrameLayout frameLayout = new FrameLayout(this);
+        frameLayout.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // Main content layout
+        LinearLayout mainLayout = new LinearLayout(this);
+        mainLayout.setOrientation(LinearLayout.VERTICAL);
+        mainLayout.setPadding(32, 32, 32, 32);
+        mainLayout.setGravity(Gravity.CENTER_HORIZONTAL);
+        DrawerLayout.LayoutParams mainParams = new DrawerLayout.LayoutParams(
+                DrawerLayout.LayoutParams.MATCH_PARENT, DrawerLayout.LayoutParams.MATCH_PARENT);
+        mainLayout.setLayoutParams(mainParams);
 
         // Title
         TextView title = new TextView(this);
         title.setText("ZazzProxy: Offline P2P Sharing");
         title.setTextSize(22);
         title.setGravity(Gravity.CENTER);
-        rootLayout.addView(title);
+        mainLayout.addView(title);
 
-        // Mode toggle button
-        Button toggleModeBtn = new Button(this);
-        toggleModeBtn.setText("Switch to Client Mode");
-        rootLayout.addView(toggleModeBtn);
-
-        // Action button
-        Button actionBtn = new Button(this);
-        actionBtn.setText("Share Files");
-        rootLayout.addView(actionBtn);
+        // Big round start button
+        RoundStartButton startButton = new RoundStartButton(this);
+        LinearLayout.LayoutParams startBtnParams = new LinearLayout.LayoutParams(400, 400);
+        startBtnParams.gravity = Gravity.CENTER_HORIZONTAL;
+        startBtnParams.topMargin = 48;
+        mainLayout.addView(startButton, startBtnParams);
 
         // Status area
         statusText = new TextView(this);
         statusText.setText("Status: Ready (Server Mode)");
         statusText.setPadding(0, 24, 0, 8);
-        rootLayout.addView(statusText);
+        mainLayout.addView(statusText);
 
         // Log/history area
         TextView logLabel = new TextView(this);
         logLabel.setText("History / Log:");
-        rootLayout.addView(logLabel);
+        mainLayout.addView(logLabel);
 
         ScrollView logScroll = new ScrollView(this);
         logText = new TextView(this);
         logText.setText("");
         logScroll.addView(logText);
-        rootLayout.addView(logScroll, new LinearLayout.LayoutParams(
+        mainLayout.addView(logScroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // Toggle mode logic
-        toggleModeBtn.setOnClickListener(new View.OnClickListener() {
+        // Menu icon (hamburger)
+        MenuIconView menuIcon = new MenuIconView(this);
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(100, 100);
+        iconParams.gravity = Gravity.TOP | Gravity.START;
+        iconParams.topMargin = 24;
+        iconParams.leftMargin = 24;
+        menuIcon.setLayoutParams(iconParams);
+        menuIcon.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                isServerMode = !isServerMode;
-                if (isServerMode) {
-                    toggleModeBtn.setText("Switch to Client Mode");
-                    actionBtn.setText("Share Files");
-                    statusText.setText("Status: Ready (Server Mode)");
-                    appendLog("Switched to Server Mode");
-                } else {
-                    toggleModeBtn.setText("Switch to Server Mode");
-                    actionBtn.setText("Receive Files");
-                    statusText.setText("Status: Ready (Client Mode)");
-                    appendLog("Switched to Client Mode");
+                drawerLayout.openDrawer(GravityCompat.START);
+            }
+        });
+        frameLayout.addView(mainLayout);
+        frameLayout.addView(menuIcon);
+
+        // Theme toggle icon (sun/moon)
+        ThemeToggleView themeToggle = new ThemeToggleView(this);
+        FrameLayout.LayoutParams themeParams = new FrameLayout.LayoutParams(100, 100);
+        themeParams.gravity = Gravity.BOTTOM | Gravity.END;
+        themeParams.bottomMargin = 48;
+        themeParams.rightMargin = 24;
+        themeToggle.setLayoutParams(themeParams);
+        // Set initial state based on current mode
+        int currentNightMode = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        themeToggle.setDark(currentNightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES);
+        themeToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean dark = !themeToggle.isDark();
+                themeToggle.setDark(dark);
+                AppCompatDelegate.setDefaultNightMode(
+                        dark ? AppCompatDelegate.MODE_NIGHT_YES : AppCompatDelegate.MODE_NIGHT_NO);
+            }
+        });
+        frameLayout.addView(themeToggle);
+
+        // Drawer panel (left)
+        LinearLayout drawerPanel = new LinearLayout(this);
+        drawerPanel.setOrientation(LinearLayout.VERTICAL);
+        drawerPanel.setBackgroundColor(0xFFEEEEEE);
+        DrawerLayout.LayoutParams drawerParams = new DrawerLayout.LayoutParams(
+                600, DrawerLayout.LayoutParams.MATCH_PARENT);
+        drawerParams.gravity = GravityCompat.START;
+        drawerPanel.setLayoutParams(drawerParams);
+        TextView drawerTitle = new TextView(this);
+        drawerTitle.setText("ZazzProxy Menu");
+        drawerTitle.setTextSize(20);
+        drawerTitle.setPadding(32, 64, 32, 32);
+        drawerPanel.addView(drawerTitle);
+
+        // Set Client Name
+        Button setClientNameBtn = new Button(this);
+        setClientNameBtn.setText("Set Client Name");
+        setClientNameBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                EditText input = new EditText(MainActivity.this);
+                input.setHint("Enter client name");
+                Toast.makeText(MainActivity.this, "Feature coming soon", Toast.LENGTH_SHORT).show();
+                // TODO: Show dialog to set client name
+            }
+        });
+        drawerPanel.addView(setClientNameBtn);
+
+        // Set Server Name
+        Button setServerNameBtn = new Button(this);
+        setServerNameBtn.setText("Set Server Name");
+        setServerNameBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                EditText input = new EditText(MainActivity.this);
+                input.setHint("Enter server name");
+                Toast.makeText(MainActivity.this, "Feature coming soon", Toast.LENGTH_SHORT).show();
+                // TODO: Show dialog to set server name
+            }
+        });
+        drawerPanel.addView(setServerNameBtn);
+
+        // Settings
+        Button settingsBtn = new Button(this);
+        settingsBtn.setText("Settings");
+        settingsBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Toast.makeText(MainActivity.this, "Settings coming soon", Toast.LENGTH_SHORT).show();
+                // TODO: Open settings screen
+            }
+        });
+        drawerPanel.addView(settingsBtn);
+
+        // Add layouts to DrawerLayout
+        drawerLayout.addView(frameLayout);
+        drawerLayout.addView(drawerPanel);
+
+        // Swipe left to move to server side (right screen)
+        frameLayout.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getAction()) {
+                    case MotionEvent.ACTION_DOWN:
+                        startX = event.getX();
+                        return false;
+                    case MotionEvent.ACTION_UP:
+                        endX = event.getX();
+                        if (startX - endX > SWIPE_THRESHOLD) {
+                            // TODO: Show server side UI (right screen)
+                            Toast.makeText(MainActivity.this, "Swiped to Server Side!", Toast.LENGTH_SHORT).show();
+                        }
+                        return false;
                 }
+                return false;
             }
         });
 
-        // Action button logic (placeholder)
-        actionBtn.setOnClickListener(new View.OnClickListener() {
+        // Start button logic
+        startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (isServerMode) {
-                    appendLog("[Server] Share Files clicked");
-                    // TODO: Implement server logic
-                } else {
-                    appendLog("[Client] Receive Files clicked");
-                    // TODO: Implement client logic
-                }
+                appendLog("Start button pressed");
+                // TODO: Implement start logic
             }
         });
 
-        setContentView(rootLayout);
+        setContentView(drawerLayout);
     }
 
     private void appendLog(String msg) {
