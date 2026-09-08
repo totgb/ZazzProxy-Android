@@ -2,6 +2,7 @@ package com.totgb.zazzproxy;
 
 import android.content.Context;
 import android.graphics.Typeface;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -26,7 +27,13 @@ import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentTransaction;
 import androidx.viewpager.widget.ViewPager;
 
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.MulticastSocket;
+
 public class MainActivity extends AppCompatActivity {
+    private final java.util.Set<String> discoveredPeers = new java.util.HashSet<>();
     private boolean isServerMode = true;
     private TextView statusText;
     private TextView logText;
@@ -38,12 +45,22 @@ public class MainActivity extends AppCompatActivity {
 
     private FrameLayout fragmentContainer;
 
+    private MulticastSocket multicastSocket;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         EdgeToEdge.enable(this);
         // Enable light/dark mode auto
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM);
+
+
+        // Multicast lock
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi != null) {
+            WifiManager.MulticastLock lock = wifi.createMulticastLock("ZazzProxyLock");
+            lock.acquire();
+        }
 
         // DrawerLayout root
         drawerLayout = new DrawerLayout(this);
@@ -271,6 +288,92 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // Implement UDP Discovery
+    // Inside MainActivity.java
+
+    private static final String MULTICAST_GROUP = "239.0.0.1";
+    private static final int PORT = 8888;
+    private boolean isScanning = false;
+
+    private void startDiscovery() {
+        isScanning = true;
+        discoveredPeers.clear(); // Reset this list of found peers
+        appendLog("Starting UDP Discovery...");
+
+        // 1. Start the Listener (to find others)
+        new Thread(this::listenForPeers).start();
+
+        // 2. Start the Broadcaster (to be found by others)
+        new Thread(this::broadcastPresence).start();
+    }
+
+    private void broadcastPresence() {
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setBroadcast(true);
+            String message = "ZAZZ_PEER:" + android.os.Build.MODEL;
+            byte[] buffer = message.getBytes();
+            DatagramPacket packet = new DatagramPacket(
+                    buffer, buffer.length, InetAddress.getByName(MULTICAST_GROUP), PORT);
+
+            while (isScanning) {
+                socket.send(packet);
+                Thread.sleep(3000); // Broadcast every 3 seconds
+            }
+        } catch (Exception e) {
+            runOnUiThread(() -> appendLog("Broadcast Error: " + e.getMessage()));
+        }
+    }
+
+    private void listenForPeers() {
+        try {
+            // Initialize the class-level variable, not a local one
+            multicastSocket = new MulticastSocket(PORT);
+            InetAddress group = InetAddress.getByName(MULTICAST_GROUP);
+            multicastSocket.joinGroup(group);
+
+            byte[] buffer = new byte[1024];
+            while (isScanning) {
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+
+                // This call blocks until a packet is received or the socket is closed
+                multicastSocket.receive(packet);
+
+                String received = new String(packet.getData(), 0, packet.getLength());
+                String senderIp = packet.getAddress().getHostAddress();
+
+                if (received.startsWith("ZAZZ_PEER:")) {
+                    String peerName = received.replace("ZAZZ_PEER:", "");
+
+                    if(!discoveredPeers.contains(senderIp)) {
+                        discoveredPeers.add(senderIp);
+                        runOnUiThread(() -> appendLog("Found Peer: " + peerName + " at " + senderIp));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // When stopDiscovery() calls multicastSocket.close(),
+            // receive() throws a SocketException. We only log if it's unexpected.
+            if (isScanning) {
+                runOnUiThread(() -> appendLog("Listen Error: " + e.getMessage()));
+            }
+        } finally {
+            if (multicastSocket != null && !multicastSocket.isClosed()) {
+                multicastSocket.close();
+            }
+        }
+    }
+    private void stopDiscovery() {
+        isScanning = false;
+        if(multicastSocket != null){
+            multicastSocket.close();
+            multicastSocket = null; // Reset to null after closing
+        }
+        appendLog("UDP Discovery Stopped.");
+
+        // Note: The sockets will close automatically or on next loop iteration
+        // because isScanning is now false.
+    }
+
     private void appendLog(String msg) {
         logText.append(msg + "\n");
     }
@@ -312,6 +415,16 @@ public class MainActivity extends AppCompatActivity {
         startBtnParams.gravity = Gravity.CENTER_HORIZONTAL;
         startBtnParams.topMargin = 48;
         mainLayout.addView(startButton, startBtnParams);
+        // Separate Stop Button
+        Button stopButton = new Button(this);
+        stopButton.setText("STOP DISCOVERY");
+        stopButton.setVisibility(View.GONE); // Hidden by default
+        LinearLayout.LayoutParams stopBtnParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        stopBtnParams.gravity = Gravity.CENTER_HORIZONTAL;
+        stopBtnParams.topMargin = 24;
+        mainLayout.addView(stopButton, stopBtnParams);
+
         // Status area
         statusText = new TextView(this);
         statusText.setText("Status: Ready (Client Mode)");
@@ -331,10 +444,26 @@ public class MainActivity extends AppCompatActivity {
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                appendLog("Start button pressed");
-                // TODO: Implement start logic
+                if (!isScanning) {
+                    startDiscovery();
+                    startButton.setEnabled(false); // Disable to prevent multiple threads
+                    stopButton.setVisibility(View.VISIBLE);
+                    statusText.setText("Status: Scanning for peers...");
+                }
+            }
+        });
+        // Stop Button Logic
+        stopButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopDiscovery();
+                startButton.setEnabled(true);
+                stopButton.setVisibility(View.GONE);
+                statusText.setText("Status: Ready (Client Mode)");
             }
         });
         return mainLayout;
     }
 }
+
+
