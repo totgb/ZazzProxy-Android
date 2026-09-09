@@ -7,8 +7,33 @@ appcompat = "1.7.1"
 material = "1.12.0"
 activity = "1.10.1"
 constraintlayout = "2.2.1"
+firebaseInappmessaging = "22.0.3"
+# ... existing versions ...
+netty = "4.1.112.Final"
+jackson = "2.17.2"
+bouncycastle = "1.78.1"
+slf4j = "2.0.13"
+testng = "7.10.2"
+mockito = "5.12.0"
 
 [libraries]
+# Networking
+netty-all = { group = "io.netty", name = "netty-all", version.ref = "netty" }
+
+# Data / Protocol
+jackson-databind = { group = "com.fasterxml.jackson.core", name = "jackson-databind", version.ref = "jackson" }
+commons-codec = { group = "commons-codec", name = "commons-codec", version = "1.17.1" }
+
+# Security
+bouncycastle-android = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
+
+# Logging
+slf4j-api = { group = "org.slf4j", name = "slf4j-api", version.ref = "slf4j" }
+
+# Testing
+testng = { group = "org.testng", name = "testng", version.ref = "testng" }
+mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
+
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
@@ -16,6 +41,7 @@ appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "a
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
 constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+firebase-inappmessaging = { group = "com.google.firebase", name = "firebase-inappmessaging", version.ref = "firebaseInappmessaging" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

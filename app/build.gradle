@@ -16,6 +16,16 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // TO PREVENT JAR CONFLICTS
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            pickFirsts += "META-INF/INDEX.LIST"
+            pickFirsts += "META-INF/io.netty.versions.properties"
+            pickFirsts += "META-INF/DEPENDENCIES"
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
@@ -30,12 +40,29 @@ android {
 }
 
 dependencies {
-
+    // UI and Core Libraries
     implementation libs.appcompat
     implementation libs.material
     implementation libs.activity
     implementation libs.constraintlayout
+    implementation libs.firebase.inappmessaging
+
+    // Networking & Architecture
+    implementation libs.netty.all
+    implementation libs.jackson.databind
+    implementation libs.commons.codec
+    implementation libs.bouncycastle.android
+    implementation libs.slf4j.api
+
+    // Unit Testing (Local JVM tests)
     testImplementation libs.junit
+    testImplementation libs.testng
+    testImplementation libs.mockito.core
+
+    // Instrumented Testing (Android device tests)
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core
+
+    androidTestImplementation libs.testng
+    androidTestImplementation libs.mockito.core
 }
