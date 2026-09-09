@@ -1,6 +1,9 @@
 package com.totgb.zazzproxy;
 
 import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.OpenableColumns;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -15,6 +18,7 @@ import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
 public class ServerFragment extends Fragment {
+    private TextView fileListContent;
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
@@ -25,7 +29,8 @@ public class ServerFragment extends Fragment {
         // 2. Main content container
         LinearLayout layout = new LinearLayout(getContext());
         layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setPadding(48, 64, 48, 48);
+        // The activity owns the floating menu affordance; reserve it a real row.
+        layout.setPadding(dp(24), dp(88), dp(24), dp(88));
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView title = new TextView(getContext());
@@ -56,13 +61,69 @@ public class ServerFragment extends Fragment {
         fileListHeader.setTypeface(null, android.graphics.Typeface.BOLD);
         layout.addView(fileListHeader);
 
-        TextView fileListContent = new TextView(getContext());
+        fileListContent = new TextView(getContext());
         fileListContent.setText("No files selected.");
-        fileListContent.setPadding(0, 16, 0, 16);
+        fileListContent.setPadding(0, dp(12), 0, dp(12));
         layout.addView(fileListContent);
 
         scrollView.addView(layout);
+        refreshHostedFiles();
         return scrollView; // Return the scrollview, not the layout!
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != 1001 || resultCode != android.app.Activity.RESULT_OK || data == null) return;
+        if (data.getClipData() != null) {
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) addDocument(data.getClipData().getItemAt(i).getUri());
+        } else if (data.getData() != null) {
+            addDocument(data.getData());
+        }
+    }
+
+    private void addDocument(Uri uri) {
+        if (!(getActivity() instanceof MainActivity)) return;
+        try { requireContext().getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (SecurityException ignored) { }
+        ((MainActivity) getActivity()).hostDocument(uri, documentName(uri), this::refreshHostedFiles);
+    }
+
+    private String documentName(Uri uri) {
+        try (Cursor cursor = requireContext().getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) return cursor.getString(index);
+            }
+        }
+        return "shared-file";
+    }
+
+    private void refreshHostedFiles() {
+        if (!(getActivity() instanceof MainActivity) || fileListContent == null) return;
+        // The actual files stay private to the app; this display deliberately exposes names only.
+        java.io.File folder = new java.io.File(requireContext().getFilesDir(), "zazzproxy/shared");
+        java.io.File[] files = folder.listFiles();
+        if (files == null || files.length == 0) { fileListContent.setText("No files selected."); return; }
+        StringBuilder text = new StringBuilder();
+        for (java.io.File file : files) if (file.isFile() && !file.getName().startsWith(".") && !file.getName().equals("catalog.zaZzProxy")) text.append("• ").append(file.getName()).append('\n');
+        fileListContent.setText(text.length() == 0 ? "No files selected." : text.toString());
+        if (text.length() > 0) {
+            fileListContent.setText(text + "\nTap here to remove a hosted file.");
+            fileListContent.setClickable(true);
+            fileListContent.setOnClickListener(v -> showRemoveDialog(files));
+        }
+    }
+
+    private void showRemoveDialog(java.io.File[] files) {
+        java.util.ArrayList<java.io.File> hosted = new java.util.ArrayList<>();
+        for (java.io.File file : files) if (file.isFile() && !file.getName().startsWith(".") && !file.getName().equals("catalog.zaZzProxy")) hosted.add(file);
+        String[] names = new String[hosted.size()];
+        for (int i = 0; i < hosted.size(); i++) names[i] = hosted.get(i).getName();
+        new android.app.AlertDialog.Builder(requireContext()).setTitle("Remove hosted file")
+                .setItems(names, (d, which) -> new android.app.AlertDialog.Builder(requireContext()).setTitle("Remove " + names[which] + "?")
+                        .setMessage("Clients will no longer be able to download it from this server.")
+                        .setPositiveButton("Remove", (confirm, ignored) -> ((MainActivity) requireActivity()).removeHostedFile(names[which], this::refreshHostedFiles))
+                        .setNegativeButton("Cancel", null).show()).setNegativeButton("Cancel", null).show();
     }
 
     @Override
@@ -73,5 +134,9 @@ public class ServerFragment extends Fragment {
 
             ((MainActivity) getActivity()).stopAllNetworking();
         }
+    }
+
+    private int dp(int value) {
+        return Math.round(value * requireContext().getResources().getDisplayMetrics().density);
     }
 }

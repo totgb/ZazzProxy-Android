@@ -15,6 +15,7 @@ public class RoundStartButton extends View {
     private Paint paint;
     private Paint textPaint;
     private boolean pressed = false;
+    private boolean active = false;
     private OnClickListener onClickListener;
 
     public RoundStartButton(Context context) {
@@ -42,9 +43,9 @@ public class RoundStartButton extends View {
         float radius = Math.min(w, h) / 2f - 10;
         float cx = w / 2f;
         float cy = h / 2f;
-        paint.setColor(pressed ? Color.parseColor("#1976D2") : Color.parseColor("#2196F3"));
+        paint.setColor(pressed ? Color.parseColor("#007E59") : (active ? Color.parseColor("#009E70") : Color.parseColor("#1666C5")));
         canvas.drawCircle(cx, cy, radius, paint);
-        canvas.drawText("START", cx, cy + 24, textPaint);
+        canvas.drawText(active ? "ACTIVE" : "START", cx, cy + 24, textPaint);
     }
     @Override
     public boolean onTouchEvent(MotionEvent event) {
@@ -56,7 +57,7 @@ public class RoundStartButton extends View {
             case MotionEvent.ACTION_UP:
                 pressed = false;
                 invalidate();
-                if (onClickListener != null) onClickListener.onClick(this);
+                performClick();
                 return true;
             case MotionEvent.ACTION_CANCEL:
                 pressed = false;
@@ -68,4 +69,10 @@ public class RoundStartButton extends View {
     public void setOnClickListener(OnClickListener l) {
         this.onClickListener = l;
     }
+    @Override public boolean performClick() {
+        super.performClick();
+        if (onClickListener != null) onClickListener.onClick(this);
+        return true;
+    }
+    public void setActive(boolean active) { this.active = active; invalidate(); }
 }

@@ -57,7 +57,7 @@ public class ThemeToggleView extends View {
             case MotionEvent.ACTION_UP:
                 pressed = false;
                 invalidate();
-                if (onClickListener != null) onClickListener.onClick(this);
+                performClick();
                 return true;
             case MotionEvent.ACTION_CANCEL:
                 pressed = false;
@@ -68,6 +68,11 @@ public class ThemeToggleView extends View {
     }
     public void setOnClickListener(OnClickListener l) {
         this.onClickListener = l;
+    }
+    @Override public boolean performClick() {
+        super.performClick();
+        if (onClickListener != null) onClickListener.onClick(this);
+        return true;
     }
     public void setDark(boolean dark) {
         isDark = dark;
