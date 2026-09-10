@@ -64,10 +64,12 @@ public class MainActivity extends AppCompatActivity {
     private final android.os.Handler incomingOfferHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable incomingOfferDialog = this::showIncomingOffers;
     private final java.util.Map<String, List<FileInfo>> receivedManifests = new java.util.LinkedHashMap<>();
+    private final java.util.List<ZazzArchive.DownloadRecord> downloadedRecords = new java.util.ArrayList<>();
     private boolean transferredInSession;
     private LinearLayout transferPanel;
     private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, TextView> transferLabels = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, TransferState> transferStates = new java.util.LinkedHashMap<>();
     private final android.os.Handler searchHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Set<String> promptedServers = new HashSet<>();
     private boolean searchPulse;
@@ -86,6 +88,18 @@ public class MainActivity extends AppCompatActivity {
     private static final String ACTION_CLOSE_CONNECTION =
             "com.totgb.zazzproxy.action.CLOSE_CONNECTION";
     private boolean closeConnectionRequested;
+
+    private static final class TransferState {
+        final long current;
+        final long total;
+        final boolean upload;
+        TransferState(long current, long total, boolean upload) {
+            this.current = current;
+            this.total = total;
+            this.upload = upload;
+        }
+    }
+    private String notificationTransferStatus = "";
     private final Runnable notificationCheck = new Runnable() {
         @Override public void run() {
             if (node == null || role == null) return;
@@ -97,6 +111,7 @@ public class MainActivity extends AppCompatActivity {
                         present = true;
                         break;
                     }
+
                 }
             }
             if (!present) ensureConnectionNotification();
@@ -162,6 +177,12 @@ public class MainActivity extends AppCompatActivity {
     private void showDashboard() {
         acquireWifi();
         requestStorageAccess();
+        try {
+            downloadedRecords.clear();
+            downloadedRecords.addAll(ZazzArchive.loadDownloads(this));
+        } catch (Exception error) {
+            MacToast.show(this, "Could not load download history", false);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -325,6 +346,24 @@ public class MainActivity extends AppCompatActivity {
         put(page);
     }
 
+    private void downloadedPage() {
+        updateActivePage("DOWNLOADED");
+        LinearLayout page = page();
+        page.addView(eyebrow("DOWNLOAD HISTORY"));
+        page.addView(title("Downloaded files."));
+        page.addView(subtitle("Completed files verified on this device."));
+        if (downloadedRecords.isEmpty()) {
+            page.addView(subtitle("No completed downloads yet."));
+        } else {
+            for (ZazzArchive.DownloadRecord record : downloadedRecords) {
+                page.addView(subtitle(record.name + "\n" + record.path));
+            }
+        }
+        page.addView(action("OPEN DOWNLOADS", "Browse the Download/zaZzProxy folder.",
+                v -> openDownloadsFolder()));
+        put(page);
+    }
+
     private View modeCard(String badge, String heading, String detail, String action, boolean server) {
         MaterialCardView card = new MaterialCardView(this);
         card.setRadius(dp(26));
@@ -473,6 +512,10 @@ public class MainActivity extends AppCompatActivity {
         page.addView(clientFiles);
         transferPanel = transferPanel();
         page.addView(transferPanel);
+        for (java.util.Map.Entry<String, TransferState> entry : transferStates.entrySet()) {
+            TransferState state = entry.getValue();
+            showTransferProgress(entry.getKey(), state.current, state.total, state.upload);
+        }
         if (connectedServer != null) {
             lastManifestSignature = "";
             showFiles(connectedServer, receivedManifests.getOrDefault(
@@ -836,6 +879,7 @@ public class MainActivity extends AppCompatActivity {
                     finishTransfer(file.getName());
                     showTransferSuccess();
                 });
+                if (role == SessionCoordinator.Role.CLIENT) recordCompletedDownload(file);
                 androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
                 if (fragment instanceof ServerFragment) {
                     ((ServerFragment) fragment).finishTransfer(file.getName());
@@ -999,6 +1043,48 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private void recordCompletedDownload(File file) {
+        new Thread(() -> {
+            if (!file.isFile()) {
+                runOnUiThread(() -> MacToast.show(this, "Downloaded file could not be verified", false));
+                return;
+            }
+            ZazzArchive.DownloadRecord record = new ZazzArchive.DownloadRecord(
+                    file.getName(), file.getAbsolutePath(), file.length(), System.currentTimeMillis());
+            try {
+                ZazzArchive.rememberDownload(this, record);
+                runOnUiThread(() -> {
+                    downloadedRecords.removeIf(existing -> existing.path.equals(record.path));
+                    downloadedRecords.add(0, record);
+                    showDownloadedConfirmation();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> MacToast.show(this, "Could not save download history", false));
+            }
+        }).start();
+    }
+
+    private void showDownloadedConfirmation() {
+        StringBuilder message = new StringBuilder("All completed files were verified:\n\n");
+        for (ZazzArchive.DownloadRecord record : downloadedRecords) {
+            message.append(record.name).append("\n").append(record.path).append("\n\n");
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Download complete")
+                .setMessage(message.toString())
+                .setNegativeButton("CLOSE", null)
+                .setPositiveButton("OPEN DOWNLOADS", (dialog, which) -> openDownloadsFolder())
+                .show();
+    }
+
+    private void openDownloadsFolder() {
+        try {
+            startActivity(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE));
+        } catch (Exception error) {
+            MacToast.show(this, "Could not open the file browser", false);
+        }
+    }
+
     public void ensureConnectionNotification() {
         if (node == null || role == null) return;
         android.app.NotificationManager manager =
@@ -1017,9 +1103,11 @@ public class MainActivity extends AppCompatActivity {
         close.setAction(ACTION_CLOSE_CONNECTION);
         android.app.PendingIntent closePending = android.app.PendingIntent.getActivity(this, 2, close,
                 android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
-        String text = role == SessionCoordinator.Role.SERVER
+        String connectionText = role == SessionCoordinator.Role.SERVER
                 ? "Server is running on " + localHost() + ":" + localPort()
                 : "Connected to " + (connectedServer == null ? "a server" : connectedServer.name);
+        String text = notificationTransferStatus.isEmpty()
+                ? connectionText : connectionText + " · " + notificationTransferStatus;
         String closeLabel = role == SessionCoordinator.Role.SERVER
                 ? "CLOSE SERVER" : "DISCONNECT FROM SERVER";
         android.app.Notification notification = new androidx.core.app.NotificationCompat.Builder(
@@ -1186,8 +1274,10 @@ public class MainActivity extends AppCompatActivity {
 
     public void returnHome() {
         confirmStopIfNeeded(() -> {
+            boolean completedTransfer = transferredInSession;
             stopSession(true);
             dashboard();
+            if (completedTransfer) showTransferSuccess();
         });
     }
 
@@ -1206,7 +1296,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopSession(boolean feedback) {
         boolean wasActive = node != null || role != null;
-        boolean completedTransfer = transferredInSession;
         notificationHandler.removeCallbacks(notificationCheck);
         android.app.NotificationManager notificationManager =
                 getSystemService(android.app.NotificationManager.class);
@@ -1232,7 +1321,6 @@ public class MainActivity extends AppCompatActivity {
             connectionLabel = connectionLabel == null ? null : connectionLabel;
             MacToast.show(this, "Sharing session stopped", false);
             SoundFeedback.play(true);
-            if (completedTransfer) showTransferSuccess();
         }
     }
 
@@ -1274,6 +1362,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void showTransferProgress(String name, long current, long total, boolean upload) {
+            transferStates.put(name, new TransferState(current, total, upload));
             ProgressBar bar = transferBars.get(name);
             TextView label = transferLabels.get(name);
             if (bar == null) {
@@ -1293,13 +1382,21 @@ public class MainActivity extends AppCompatActivity {
             int percent = total <= 0 ? 0 : (int) Math.max(0, Math.min(1000, (current * 1000L) / total));
             bar.setProgress(percent);
             label.setText((upload ? "Uploading  " : "Downloading  ") + name + "  " + (percent / 10) + "%");
+            notificationTransferStatus = (upload ? "Uploading " : "Downloading ")
+                    + name + " " + (percent / 10) + "%";
+            ensureConnectionNotification();
         }
 
     private void finishTransfer(String name) {
             ProgressBar bar = transferBars.remove(name);
             TextView label = transferLabels.remove(name);
+            transferStates.remove(name);
             if (label != null && transferPanel != null) transferPanel.removeView(label);
             if (bar != null && transferPanel != null) transferPanel.removeView(bar);
+            if (transferBars.isEmpty()) {
+                notificationTransferStatus = "";
+                ensureConnectionNotification();
+            }
         }
 
     private LinearLayout transferPanel() {
@@ -1335,7 +1432,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER);
         bar.setPadding(dp(12), dp(8), dp(12), dp(8));
-        String[] labels = {"HOME", "CONNECTION", "TRANSFER", "DEVELOPER", "SETTINGS"};
+        String[] labels = {"HOME", "CONNECTION", "TRANSFER", "DOWNLOADED", "DEVELOPER", "SETTINGS"};
         for (String label : labels) {
             MaterialButton button = new MacMotionButton(this);
             button.setText(label);
@@ -1352,6 +1449,8 @@ public class MainActivity extends AppCompatActivity {
                     filesPage();
                 } else if (label.equals("TRANSFER")) {
                     transferPage();
+                } else if (label.equals("DOWNLOADED")) {
+                    downloadedPage();
                 } else if (label.equals("DEVELOPER")) {
                     developer();
                 } else {
@@ -1381,6 +1480,7 @@ public class MainActivity extends AppCompatActivity {
         if ("HOME".equals(label)) return "⌂";
         if ("CONNECTION".equals(label)) return "⌁";
         if ("TRANSFER".equals(label)) return "➤";
+        if ("DOWNLOADED".equals(label)) return "✓";
         if ("DEVELOPER".equals(label)) return "▣";
         return "⚙";
     }

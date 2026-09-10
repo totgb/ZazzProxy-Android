@@ -34,6 +34,7 @@ public final class ZazzArchive {
     private static final byte[] MANIFEST_MAGIC = "zaZzP".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SETTINGS_MAGIC = "zaZzS".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] CONNECTIONS_MAGIC = "zaZzC".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] DOWNLOADS_MAGIC = "zaZzD".getBytes(StandardCharsets.US_ASCII);
 
     private ZazzArchive() { }
 
@@ -131,7 +132,55 @@ public final class ZazzArchive {
                 result.add(new Peer(id, name, version, true,
                         new InetSocketAddress(host, port), readBytes(in)));
             }
+
             return result;
+        }
+    }
+
+    public static final class DownloadRecord {
+        public final String name;
+        public final String path;
+        public final long bytes;
+        public final long completedAt;
+
+        public DownloadRecord(String name, String path, long bytes, long completedAt) {
+            this.name = name;
+            this.path = path;
+            this.bytes = bytes;
+            this.completedAt = completedAt;
+        }
+    }
+
+    public static synchronized void rememberDownload(Context context, DownloadRecord record) throws Exception {
+        List<DownloadRecord> records = loadDownloads(context);
+        records.removeIf(existing -> existing.path.equals(record.path));
+        records.add(0, record);
+        File file = new File(context.getFilesDir(), "downloads.zaZzSettings");
+        try (DataOutputStream out = new DataOutputStream(new FileOutputStream(file, false))) {
+            out.write(DOWNLOADS_MAGIC);
+            out.writeInt(FORMAT_VERSION);
+            out.writeInt(records.size());
+            for (DownloadRecord saved : records) {
+                writeText(out, saved.name);
+                writeText(out, saved.path);
+                out.writeLong(saved.bytes);
+                out.writeLong(saved.completedAt);
+            }
+        }
+    }
+
+    public static synchronized List<DownloadRecord> loadDownloads(Context context) throws Exception {
+        File file = new File(context.getFilesDir(), "downloads.zaZzSettings");
+        if (!file.isFile()) return new ArrayList<>();
+        try (DataInputStream in = new DataInputStream(new FileInputStream(file))) {
+            requireMagic(in, DOWNLOADS_MAGIC);
+            readVersion(in);
+            int count = readCount(in);
+            List<DownloadRecord> records = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                records.add(new DownloadRecord(readText(in), readText(in), in.readLong(), in.readLong()));
+            }
+            return records;
         }
     }
     private static void writeText(DataOutputStream out, String value) throws Exception {

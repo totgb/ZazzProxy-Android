@@ -134,7 +134,7 @@ public final class ZazzUdpNode implements Closeable {
                         ? uploadDirectory(peer.name) : downloadDirectory(peer.name);
                 receives.put(transfer, new Incoming(transfer, peer.address(),
                         HostedFileService.uniqueFile(directory, HostedFileService.safeName(file.name)),
-                        file, true));
+                        file, advertisedServer));
             } catch (Exception e) {
                 postFail("Could not prepare incoming file");
                 accepted = false;
