@@ -130,8 +130,11 @@ public final class ZazzUdpNode implements Closeable {
     public void approveUpload(Peer peer, String transfer, FileInfo file, boolean accepted) {
         if (accepted) {
             try {
+                File directory = advertisedServer
+                        ? uploadDirectory(peer.name) : downloadDirectory(peer.name);
                 receives.put(transfer, new Incoming(transfer, peer.address(),
-                        HostedFileService.uniqueFile(uploadDirectory(peer.name), HostedFileService.safeName(file.name)), file, true));
+                        HostedFileService.uniqueFile(directory, HostedFileService.safeName(file.name)),
+                        file, true));
             } catch (Exception e) {
                 postFail("Could not prepare incoming file");
                 accepted = false;
@@ -203,6 +206,13 @@ public final class ZazzUdpNode implements Closeable {
         FileInfo metadata = new FileInfo(UUID.randomUUID().toString(), HostedFileService.safeName(file.getName()), file.length(), sha256(file));
         pendingSends.put(transfer, new Outgoing(transfer, peer.address(), file, metadata, true));
         sendRaw(peer.address(), UPLOAD_OFFER, transfer, 0, BinaryProtocol.file(metadata));
+    }
+    public void sendHostedFiles(Peer peer) throws Exception {
+        if (!advertisedServer) throw new IllegalStateException("Only a server can send hosted files.");
+        for (FileInfo info : hostedFiles()) {
+            File file = new File(hostedFiles.hostedDir(), HostedFileService.safeName(info.name));
+            if (file.isFile()) upload(peer, file);
+        }
     }
     public List<FileInfo> hostedFiles() {
         return hostedFiles.hostedFiles();

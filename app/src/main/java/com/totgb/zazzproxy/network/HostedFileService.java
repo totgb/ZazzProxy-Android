@@ -27,14 +27,21 @@ final class HostedFileService {
     HostedFileService(Context context, String nodeName) {
         this.nodeName = nodeName;
         hostedDir = new File(context.getFilesDir(), "zazzproxy/shared");
-        downloadDir = new File(Environment.getExternalStorageDirectory(), "zaZzProxy");
+        downloadDir = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS), "zaZzProxy");
         hostedDir.mkdirs();
         downloadDir.mkdirs();
     }
 
     File hostedDir() { return hostedDir; }
-    File downloadDirectory(String name) { return directory(name); }
-    File uploadDirectory(String name) { return directory(name); }
+    File downloadDirectory(String name) {
+        File directory = new File(ensureDownloadDirectory(), safeName(name));
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create server download folder");
+        }
+        return directory;
+    }
+    File uploadDirectory(String name) { return ensureDownloadDirectory(); }
 
     List<FileInfo> hostedFiles() {
         File[] files = hostedDir.listFiles();
@@ -90,12 +97,11 @@ final class HostedFileService {
         return result;
     }
 
-    private File directory(String name) {
-        File directory = new File(downloadDir, safeName(name));
-        if (!directory.exists() && !directory.mkdirs()) {
+    private File ensureDownloadDirectory() {
+        if (!downloadDir.exists() && !downloadDir.mkdirs()) {
             throw new IllegalStateException("Could not create transfer folder");
         }
-        return directory;
+        return downloadDir;
     }
 
     private static String sha256(File file) throws Exception {

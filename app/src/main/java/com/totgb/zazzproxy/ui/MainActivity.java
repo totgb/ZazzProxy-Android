@@ -46,6 +46,7 @@ public class MainActivity extends AppCompatActivity {
     private ZazzUdpNode node;
     private SessionCoordinator.Role role;
     private TextView connectionLabel, activityLog;
+    private TextView connectionPageStatus;
     private TextView clientSelectedFiles;
     private MacMotionButton clientStopButton;
     private View clientCard;
@@ -59,6 +60,10 @@ public class MainActivity extends AppCompatActivity {
     private String lastManifestSignature = "";
     private final java.util.Map<String, Peer> discoveredServerPeers = new java.util.LinkedHashMap<>();
     private final java.util.List<File> pendingClientFiles = new java.util.ArrayList<>();
+    private final java.util.Map<String, PendingUpload> pendingUploads = new java.util.LinkedHashMap<>();
+    private final android.os.Handler incomingOfferHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable incomingOfferDialog = this::showIncomingOffers;
+    private final java.util.Map<String, List<FileInfo>> receivedManifests = new java.util.LinkedHashMap<>();
     private boolean transferredInSession;
     private LinearLayout transferPanel;
     private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
@@ -75,16 +80,93 @@ public class MainActivity extends AppCompatActivity {
     private View responsiveRoot;
     private int lastWidth;
     private int lastHeight;
+    private final android.os.Handler notificationHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private static final int CONNECTION_NOTIFICATION_ID = 72;
+    private static final String CONNECTION_CHANNEL = "zazzproxy_connection";
+    private static final String ACTION_CLOSE_CONNECTION =
+            "com.totgb.zazzproxy.action.CLOSE_CONNECTION";
+    private boolean closeConnectionRequested;
+    private final Runnable notificationCheck = new Runnable() {
+        @Override public void run() {
+            if (node == null || role == null) return;
+            android.app.NotificationManager manager = getSystemService(android.app.NotificationManager.class);
+            boolean present = false;
+            if (manager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                for (android.service.notification.StatusBarNotification item : manager.getActiveNotifications()) {
+                    if (item.getId() == CONNECTION_NOTIFICATION_ID) {
+                        present = true;
+                        break;
+                    }
+                }
+            }
+            if (!present) ensureConnectionNotification();
+            notificationHandler.postDelayed(this, 3000);
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         applyTheme(p().getString("theme", "system"));
         super.onCreate(state);
+        closeConnectionRequested = ACTION_CLOSE_CONNECTION.equals(getIntent().getAction());
         setContentView(new SplashOverlay(this, this::showDashboard));
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (ACTION_CLOSE_CONNECTION.equals(intent.getAction())) {
+            returnHome();
+        }
+    }
+
+    public void acceptAllUploads() {
+    if (node == null || pendingUploads.isEmpty()) {
+        MacToast.show(this, "No incoming files are waiting for approval", false);
+        return;
+    }
+    for (PendingUpload upload : new java.util.ArrayList<>(pendingUploads.values())) {
+        node.approveUpload(upload.peer, upload.transfer, upload.file, true);
+        pendingUploads.remove(upload.transfer);
+    }
+    MacToast.show(this, "All incoming files accepted", true);
+    }
+
+    public void sendHostedFilesToClients() {
+        if (node == null || role != SessionCoordinator.Role.SERVER) return;
+        List<Peer> clients = node.connectedPeers();
+        if (clients.isEmpty()) {
+            MacToast.show(this, "No connected clients are available", false);
+            return;
+        }
+        new Thread(() -> {
+            try {
+                for (Peer peer : clients) node.sendHostedFiles(peer);
+                runOnUiThread(() -> MacToast.show(this, "Hosted files sent for client approval", true));
+            } catch (Exception error) {
+                runOnUiThread(() -> MacToast.show(this, error.getMessage(), false));
+            }
+        }).start();
+    }
+
+    private static final class PendingUpload {
+    final Peer peer;
+    final String transfer;
+    final FileInfo file;
+    PendingUpload(Peer peer, String transfer, FileInfo file) {
+        this.peer = peer;
+        this.transfer = transfer;
+        this.file = file;
+    }
     }
 
     private void showDashboard() {
         acquireWifi();
         requestStorageAccess();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 902);
+        }
         LinearLayout shell = new LinearLayout(this);
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setBackgroundColor(Color.rgb(11, 17, 31));
@@ -114,6 +196,10 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         dashboard();
+        if (closeConnectionRequested) {
+            closeConnectionRequested = false;
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(this::returnHome);
+        }
     }
 
     private void applyResponsiveLayout(int width, int height) {
@@ -303,7 +389,9 @@ public class MainActivity extends AppCompatActivity {
         if (resetButton != null) resetButton.setVisibility(View.GONE);
         connect(true);
         getSupportFragmentManager().beginTransaction()
-                .replace(content.getId(), new ServerFragment()).commit();
+                .replace(content.getId(), new ServerFragment())
+                .runOnCommit(() -> showServerPage("CONNECTION"))
+                .commit();
     }
 
     private void filesPage() {
@@ -315,12 +403,17 @@ public class MainActivity extends AppCompatActivity {
         if (role == SessionCoordinator.Role.SERVER) {
             // ServerFragment contains both the connection and transfer sections.
             // Keep the live fragment attached while only the navigation state changes.
+            showServerPage("CONNECTION");
             return;
         }
         LinearLayout page = page();
         page.addView(profileHeader(false));
         page.addView(eyebrow("CONNECTION"));
         page.addView(title("Connect to a server."));
+        connectionPageStatus = subtitle(connectedServer == null
+                ? "Connection status: not connected"
+                : "Connection successful: " + connectedServer.name);
+        page.addView(connectionPageStatus);
         page.addView(subtitle("Servers nearby are listed below. Choose CONNECT to send a request."));
         page.addView(sectionLabel("SERVERS AVAILABLE"));
         discoveredServers = new LinearLayout(this);
@@ -329,6 +422,8 @@ public class MainActivity extends AppCompatActivity {
         refreshDiscoveredServers();
         page.addView(action("OPEN TRANSFERS", "View files, hosting, sending, receiving, and progress.",
                 v -> transferPage()));
+        page.addView(action("SHOW CONNECTION NOTIFICATION", "Restore the persistent connection status notification.",
+                v -> ensureConnectionNotification()));
         put(page);
     }
 
@@ -342,6 +437,7 @@ public class MainActivity extends AppCompatActivity {
         if (role == SessionCoordinator.Role.SERVER) {
             // ServerFragment already contains the server transfer area. Reusing it
             // avoids replacing an active fragment while network callbacks are arriving.
+            showServerPage("TRANSFER");
             return;
         }
 
@@ -371,17 +467,17 @@ public class MainActivity extends AppCompatActivity {
         page.addView(clientSelectedFiles);
         page.addView(action("SEND SELECTED FILES", "Ask the server to accept these files.",
                 v -> sendSelectedFiles()));
-        page.addView(sectionLabel("SERVERS AVAILABLE"));
-        discoveredServers = new LinearLayout(this);
-        discoveredServers.setOrientation(LinearLayout.VERTICAL);
-        page.addView(discoveredServers);
         page.addView(sectionLabel("AVAILABLE FILES"));
         clientFiles = new LinearLayout(this);
         clientFiles.setOrientation(LinearLayout.VERTICAL);
         page.addView(clientFiles);
         transferPanel = transferPanel();
         page.addView(transferPanel);
-        refreshDiscoveredServers();
+        if (connectedServer != null) {
+            lastManifestSignature = "";
+            showFiles(connectedServer, receivedManifests.getOrDefault(
+                    connectedServer.id, Collections.emptyList()));
+        }
         page.addView(action("CLIENT SEARCH", "Listening for servers above. Select CONNECT to send a request.", v -> { }));
         page.addView(action("ACTIVITY", "Transfers and completed downloads appear in the activity feed.", v -> { }));
         put(page);
@@ -389,6 +485,14 @@ public class MainActivity extends AppCompatActivity {
 
     public void openTransferPage() {
         transferPage();
+    }
+
+    private void showServerPage(String page) {
+        androidx.fragment.app.Fragment fragment =
+                getSupportFragmentManager().findFragmentById(content.getId());
+        if (fragment instanceof ServerFragment) {
+            ((ServerFragment) fragment).showPage(page);
+        }
     }
 
     private View profileHeader(boolean server) {
@@ -438,7 +542,11 @@ public class MainActivity extends AppCompatActivity {
             details.setPadding(dp(12), 0, dp(8), 0);
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             MacMotionButton connect = new MacMotionButton(this);
-            connect.setText("CONNECT");
+            boolean connected = connectedServer != null
+                    && connectedServer.address().getAddress().equals(peer.address().getAddress());
+            connect.setText(connected ? "CONNECTED" : "CONNECT");
+            connect.setEnabled(!connected);
+            connect.setAlpha(connected ? 0.55f : 1f);
             connect.setTextColor(Color.WHITE);
             connect.setBackgroundColor(Color.rgb(49, 103, 213));
             connect.setOnClickListener(v -> {
@@ -516,6 +624,12 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void confirmUpload(Peer peer, String transfer, FileInfo file) {
+                pendingUploads.put(transfer, new PendingUpload(peer, transfer, file));
+            if (role == SessionCoordinator.Role.CLIENT) {
+                incomingOfferHandler.removeCallbacks(incomingOfferDialog);
+                incomingOfferHandler.postDelayed(incomingOfferDialog, 150);
+                return;
+            }
             android.app.Dialog dialog = new android.app.Dialog(this);
             MaterialCardView card = new MaterialCardView(this);
             card.setRadius(dp(24));
@@ -529,18 +643,71 @@ public class MainActivity extends AppCompatActivity {
             actions.setGravity(Gravity.END);
             MacMotionButton decline = new MacMotionButton(this);
             decline.setText("DECLINE");
-            decline.setOnClickListener(v -> { node.approveUpload(peer, transfer, file, false); dialog.dismiss(); });
+            decline.setOnClickListener(v -> { pendingUploads.remove(transfer); node.approveUpload(peer, transfer, file, false); dialog.dismiss(); });
             MacMotionButton accept = new MacMotionButton(this);
             accept.setText("ACCEPT");
             accept.setTextColor(Color.WHITE);
             accept.setBackgroundColor(Color.rgb(22, 145, 105));
-            accept.setOnClickListener(v -> { node.approveUpload(peer, transfer, file, true); dialog.dismiss(); });
+            accept.setOnClickListener(v -> { pendingUploads.remove(transfer); node.approveUpload(peer, transfer, file, true); dialog.dismiss(); });
+            actions.addView(decline);
+            actions.addView(accept);
+            body.addView(actions);
+            MacMotionButton downloadAll = new MacMotionButton(this);
+            downloadAll.setText("DOWNLOAD ALL INCOMING");
+            downloadAll.setTextColor(Color.WHITE);
+            downloadAll.setBackgroundColor(Color.rgb(22, 145, 105));
+            downloadAll.setOnClickListener(v -> {
+                acceptAllUploads();
+                dialog.dismiss();
+            });
+            body.addView(downloadAll, new LinearLayout.LayoutParams(-1, dp(48)));
+            card.addView(body);
+            dialog.setContentView(card);
+            if (dialog.getWindow() != null) dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            dialog.show();
+        }
+
+        private void showIncomingOffers() {
+            if (role != SessionCoordinator.Role.CLIENT || pendingUploads.isEmpty()) return;
+            android.app.Dialog dialog = new android.app.Dialog(this);
+            MaterialCardView card = new MaterialCardView(this);
+            card.setRadius(dp(24));
+            card.setCardBackgroundColor(Color.rgb(29, 38, 61));
+            LinearLayout body = new LinearLayout(this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(dp(22), dp(20), dp(22), dp(20));
+            body.addView(title("Incoming files"));
+            StringBuilder names = new StringBuilder("The server wants to send:\n");
+            for (PendingUpload upload : pendingUploads.values()) {
+                names.append("• ").append(upload.file.name).append('\n');
+            }
+            body.addView(subtitle(names.toString()));
+            LinearLayout actions = new LinearLayout(this);
+            actions.setGravity(Gravity.END);
+            MacMotionButton decline = new MacMotionButton(this);
+            decline.setText("DECLINE ALL");
+            decline.setOnClickListener(v -> {
+                for (PendingUpload upload : new java.util.ArrayList<>(pendingUploads.values())) {
+                    node.approveUpload(upload.peer, upload.transfer, upload.file, false);
+                    pendingUploads.remove(upload.transfer);
+                }
+                dialog.dismiss();
+            });
+            MacMotionButton accept = new MacMotionButton(this);
+            accept.setText("ACCEPT ALL");
+            accept.setTextColor(Color.WHITE);
+            accept.setBackgroundColor(Color.rgb(22, 145, 105));
+            accept.setOnClickListener(v -> {
+                acceptAllUploads();
+                dialog.dismiss();
+            });
             actions.addView(decline);
             actions.addView(accept);
             body.addView(actions);
             card.addView(body);
             dialog.setContentView(card);
-            if (dialog.getWindow() != null) dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            if (dialog.getWindow() != null) dialog.getWindow().setBackgroundDrawable(
+                    new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
             dialog.show();
         }
     private boolean begin(SessionCoordinator.Role requested) {
@@ -582,6 +749,7 @@ public class MainActivity extends AppCompatActivity {
                         if (serverCard != null) serverCard.setVisibility(View.GONE);
                         if (clientStopButton != null) clientStopButton.setVisibility(View.VISIBLE);
                     }
+                    ensureConnectionNotification();
                     MacToast.show(this, server ? "Server started" : "Client searching", true);
                     SoundFeedback.play(true);
                 });
@@ -597,6 +765,7 @@ public class MainActivity extends AppCompatActivity {
                     MacToast.show(this, "Could not start networking", false);
                 });
             }
+
         }).start();
     }
 
@@ -631,7 +800,14 @@ public class MainActivity extends AppCompatActivity {
             public void onConnectionDecision(Peer peer, boolean accepted) {
                 if (accepted) {
                     runOnUiThread(() -> {
+                        connectedServer = peer;
                         setConnectionStatus("Connection accepted by " + peer.name);
+                        if (connectionPageStatus != null) {
+                            connectionPageStatus.setText("Connection successful: " + peer.name
+                                    + "\n" + peer.host + ":" + peer.address().getPort());
+                        }
+                        refreshDiscoveredServers();
+                        ensureConnectionNotification();
                         MacToast.show(MainActivity.this, "Connected to " + peer.name, true);
                         if (role == SessionCoordinator.Role.CLIENT) node.requestManifest(peer);
                     });
@@ -643,7 +819,7 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             public void onUploadOffer(Peer peer, String transfer, FileInfo file) {
-                if (role == SessionCoordinator.Role.SERVER) runOnUiThread(() -> confirmUpload(peer, transfer, file));
+                runOnUiThread(() -> confirmUpload(peer, transfer, file));
             }
             public void onManifest(Peer peer, List<FileInfo> files) { showFiles(peer, files); }
             public void onTransfer(String name, long current, long total, boolean upload) {
@@ -656,7 +832,10 @@ public class MainActivity extends AppCompatActivity {
             }
             public void onComplete(File file) {
                 transferredInSession = true;
-                runOnUiThread(() -> finishTransfer(file.getName()));
+                runOnUiThread(() -> {
+                    finishTransfer(file.getName());
+                    showTransferSuccess();
+                });
                 androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
                 if (fragment instanceof ServerFragment) {
                     ((ServerFragment) fragment).finishTransfer(file.getName());
@@ -770,6 +949,11 @@ public class MainActivity extends AppCompatActivity {
         if (node != null && role == SessionCoordinator.Role.SERVER) {
             node.approveConnection(peer, accepted);
             setConnectionStatus("Connection " + (accepted ? "accepted for " : "declined for ") + peer.name);
+            androidx.fragment.app.Fragment fragment =
+                    getSupportFragmentManager().findFragmentById(content.getId());
+            if (fragment instanceof ServerFragment) {
+                ((ServerFragment) fragment).refreshClientCards();
+            }
         }
     }
 
@@ -788,9 +972,14 @@ public class MainActivity extends AppCompatActivity {
     private void showFiles(Peer peer, List<FileInfo> files) {
         connectedServer = peer;
         runOnUiThread(() -> {
-            if (clientFiles == null) return;
             StringBuilder signature = new StringBuilder(peer.id);
             for (FileInfo file : files) signature.append('|').append(file.id).append(':').append(file.bytes).append(':').append(file.sha256);
+            receivedManifests.put(peer.id, new java.util.ArrayList<>(files));
+            if (connectedServer != null
+                    && connectedServer.address().getAddress().equals(peer.address().getAddress())) {
+                receivedManifests.put(connectedServer.id, new java.util.ArrayList<>(files));
+            }
+            if (clientFiles == null) return;
             if (signature.toString().equals(lastManifestSignature)) return;
             lastManifestSignature = signature.toString();
             clientFiles.removeAllViews();
@@ -808,6 +997,44 @@ public class MainActivity extends AppCompatActivity {
                 clientFiles.addView(download, new LinearLayout.LayoutParams(-1, dp(48)));
             }
         });
+    }
+
+    public void ensureConnectionNotification() {
+        if (node == null || role == null) return;
+        android.app.NotificationManager manager =
+                getSystemService(android.app.NotificationManager.class);
+        if (manager == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                    CONNECTION_CHANNEL, "ZazzProxy connection", android.app.NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("Persistent ZazzProxy connection status");
+            manager.createNotificationChannel(channel);
+        }
+        Intent open = new Intent(this, MainActivity.class);
+        android.app.PendingIntent pending = android.app.PendingIntent.getActivity(this, 1, open,
+                android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent close = new Intent(this, MainActivity.class);
+        close.setAction(ACTION_CLOSE_CONNECTION);
+        android.app.PendingIntent closePending = android.app.PendingIntent.getActivity(this, 2, close,
+                android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+        String text = role == SessionCoordinator.Role.SERVER
+                ? "Server is running on " + localHost() + ":" + localPort()
+                : "Connected to " + (connectedServer == null ? "a server" : connectedServer.name);
+        String closeLabel = role == SessionCoordinator.Role.SERVER
+                ? "CLOSE SERVER" : "DISCONNECT FROM SERVER";
+        android.app.Notification notification = new androidx.core.app.NotificationCompat.Builder(
+                this, CONNECTION_CHANNEL)
+                .setSmallIcon(com.totgb.zazzproxy.R.drawable.ic_zazzproxy)
+                .setContentTitle("ZazzProxy connection active")
+                .setContentText(text)
+                .setContentIntent(pending)
+                .addAction(0, closeLabel, closePending)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+        manager.notify(CONNECTION_NOTIFICATION_ID, notification);
+        notificationHandler.removeCallbacks(notificationCheck);
+        notificationHandler.postDelayed(notificationCheck, 3000);
     }
 
     private void settings() {
@@ -980,6 +1207,10 @@ public class MainActivity extends AppCompatActivity {
     private void stopSession(boolean feedback) {
         boolean wasActive = node != null || role != null;
         boolean completedTransfer = transferredInSession;
+        notificationHandler.removeCallbacks(notificationCheck);
+        android.app.NotificationManager notificationManager =
+                getSystemService(android.app.NotificationManager.class);
+        if (notificationManager != null) notificationManager.cancel(CONNECTION_NOTIFICATION_ID);
         if (node != null) node.close();
         node = null;
         releaseRole();

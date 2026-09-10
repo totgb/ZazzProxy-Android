@@ -28,6 +28,8 @@ public class ServerFragment extends Fragment {
     private LinearLayout peerList;
     private LinearLayout requestList;
     private LinearLayout transferPanel;
+    private LinearLayout connectionSection;
+    private LinearLayout transferSection;
     private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, TextView> transferLabels = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, com.totgb.zazzproxy.model.Peer> peers = new java.util.LinkedHashMap<>();
@@ -109,6 +111,16 @@ public class ServerFragment extends Fragment {
             }
         });
         addSpaced(topHalf, transferButton, 48);
+        MacMotionButton notificationButton = new MacMotionButton(requireContext());
+        notificationButton.setText("SHOW CONNECTION NOTIFICATION");
+        notificationButton.setTextColor(android.graphics.Color.WHITE);
+        notificationButton.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
+        notificationButton.setOnClickListener(v -> {
+            if (getActivity() instanceof MainActivity) {
+                ((MainActivity) getActivity()).ensureConnectionNotification();
+            }
+        });
+        addSpaced(topHalf, notificationButton, 46);
 
         TextView peersTitle = new TextView(getContext());
         peersTitle.setText("Clients nearby");
@@ -135,8 +147,8 @@ public class ServerFragment extends Fragment {
         refreshRequests.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
         refreshRequests.setOnClickListener(v -> refreshRequests());
         requestsHeading.addView(refreshRequests, new LinearLayout.LayoutParams(dp(100), dp(44)));
-        bottomHalf.addView(requestsHeading);
-        bottomHalf.addView(requestList);
+        topHalf.addView(requestsHeading);
+        topHalf.addView(requestList);
         transferPanel = new LinearLayout(getContext());
         transferPanel.setOrientation(LinearLayout.VERTICAL);
         TextView transferTitle = new TextView(getContext());
@@ -157,33 +169,45 @@ public class ServerFragment extends Fragment {
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
             startActivityForResult(intent, 1001);
         });
-        addSpaced(topHalf, pickFilesBtn, 52);
+        addSpaced(bottomHalf, pickFilesBtn, 52);
+        MacMotionButton sendHosted = new MacMotionButton(requireContext());
+        sendHosted.setText("SEND HOSTED FILES");
+        sendHosted.setTextColor(android.graphics.Color.WHITE);
+        sendHosted.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
+        sendHosted.setOnClickListener(v -> {
+            if (getActivity() instanceof MainActivity) {
+                ((MainActivity) getActivity()).sendHostedFilesToClients();
+            }
+        });
+        addSpaced(bottomHalf, sendHosted, 52);
 
         // 3. File List Area (This will now grow without covering buttons)
         TextView fileListHeader = new TextView(getContext());
         fileListHeader.setText("\nCurrently Hosting:");
         fileListHeader.setTypeface(null, android.graphics.Typeface.BOLD);
-        topHalf.addView(fileListHeader);
+        bottomHalf.addView(fileListHeader);
 
         fileListContent = new TextView(getContext());
         fileListContent.setText("No files selected.");
         fileListContent.setPadding(0, dp(12), 0, dp(4));
         fileListContent.setLineSpacing(dp(4), 1f);
-        topHalf.addView(fileListContent);
+        bottomHalf.addView(fileListContent);
         removeHint = new TextView(getContext());
         removeHint.setTextColor(android.graphics.Color.rgb(151, 190, 255));
         removeHint.setTextSize(14);
         removeHint.setPadding(0, 0, 0, dp(18));
         removeHint.setVisibility(View.GONE);
-        topHalf.addView(removeHint);
+        bottomHalf.addView(removeHint);
         TextView separator = new TextView(getContext());
         separator.setText("TRANSFER AREA");
         separator.setTextColor(android.graphics.Color.rgb(132, 169, 224));
         separator.setTypeface(null, android.graphics.Typeface.BOLD);
         separator.setPadding(0, dp(16), 0, dp(8));
-        layout.addView(topHalf, new LinearLayout.LayoutParams(-1, 0, 1));
-        layout.addView(separator);
-        layout.addView(bottomHalf, new LinearLayout.LayoutParams(-1, 0, 1));
+        connectionSection = topHalf;
+        transferSection = bottomHalf;
+        layout.addView(topHalf, new LinearLayout.LayoutParams(-1, -2));
+        layout.addView(separator, new LinearLayout.LayoutParams(-1, -2));
+        layout.addView(bottomHalf, new LinearLayout.LayoutParams(-1, -2));
 
         scrollView.addView(layout, new android.widget.ScrollView.LayoutParams(-1, -2));
         if (getActivity() instanceof MainActivity) {
@@ -201,10 +225,17 @@ public class ServerFragment extends Fragment {
             int horizontal = dp(compact ? 14 : 24);
             layout.setPadding(horizontal, dp(compact ? 10 : 18),
                     horizontal, dp(compact ? 14 : 24));
-            layout.setMinimumHeight(dp(Math.max(compact ? 760 : 1000,
-                    Math.round(scrollView.getHeight() / getResources().getDisplayMetrics().density) + 180)));
+            layout.setMinimumHeight(dp(Math.max(compact ? 760 : 900,
+                    Math.round(scrollView.getHeight() / getResources().getDisplayMetrics().density) + 40)));
         });
+        showPage("CONNECTION");
         return scrollView; // Return the scrollview, not the layout!
+    }
+
+    public void showPage(String page) {
+        boolean transfer = "TRANSFER".equals(page);
+        if (connectionSection != null) connectionSection.setVisibility(transfer ? View.GONE : View.VISIBLE);
+        if (transferSection != null) transferSection.setVisibility(transfer ? View.VISIBLE : View.GONE);
     }
 
     public void onClientFound(com.totgb.zazzproxy.model.Peer peer) {
@@ -277,6 +308,11 @@ public class ServerFragment extends Fragment {
         refreshPeers();
     }
 
+    public void refreshClientCards() {
+        refreshPeers();
+        refreshRequests();
+    }
+
     public void onTransfer(String name, long current, long total, boolean upload) {
         if (transferPanel == null) return;
         ProgressBar bar = transferBars.get(name);
@@ -317,6 +353,27 @@ public class ServerFragment extends Fragment {
             return;
         }
         for (com.totgb.zazzproxy.model.Peer peer : peers.values()) {
+            boolean connected = getActivity() instanceof MainActivity
+                    && ((MainActivity) getActivity()).connectedPeers().stream()
+                    .anyMatch(connectedPeer -> connectedPeer.id.equals(peer.id));
+            if (connected) {
+                LinearLayout card = new LinearLayout(getContext());
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(10), dp(10), dp(10), dp(10));
+                card.setBackgroundColor(android.graphics.Color.rgb(29, 38, 61));
+                TextView name = new TextView(getContext());
+                name.setText("●  " + peer.name + "\n    " + peer.host + ":"
+                        + peer.address().getPort() + "\n    Network key: MATCHED");
+                name.setTextColor(android.graphics.Color.WHITE);
+                card.addView(name);
+                MacMotionButton connectedButton = new MacMotionButton(requireContext());
+                connectedButton.setText("CONNECTED");
+                connectedButton.setEnabled(false);
+                connectedButton.setAlpha(0.55f);
+                card.addView(connectedButton, new LinearLayout.LayoutParams(-1, dp(44)));
+                peerList.addView(card, new LinearLayout.LayoutParams(-1, -2));
+                continue;
+            }
             LinearLayout card = new LinearLayout(getContext());
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(10), dp(10), dp(10), dp(10));
