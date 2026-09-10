@@ -313,8 +313,8 @@ public class MainActivity extends AppCompatActivity {
         }
         updateActivePage("CONNECTION");
         if (role == SessionCoordinator.Role.SERVER) {
-            getSupportFragmentManager().beginTransaction()
-                    .replace(content.getId(), new ServerFragment()).commit();
+            // ServerFragment contains both the connection and transfer sections.
+            // Keep the live fragment attached while only the navigation state changes.
             return;
         }
         LinearLayout page = page();
