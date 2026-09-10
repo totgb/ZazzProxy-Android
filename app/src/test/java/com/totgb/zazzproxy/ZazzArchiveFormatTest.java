@@ -51,4 +51,13 @@ public class ZazzArchiveFormatTest {
         assertEquals(manifest.files.get(0).name, "file.bin");
         assertEquals(manifest.files.get(0).bytes, 4L);
     }
+
+    @Test
+    public void roundTripsPeerControlMessages() throws Exception {
+        byte[] payload = BinaryProtocol.control((byte) 2, "peer-id", "Alex");
+        BinaryProtocol.Control control = BinaryProtocol.readControl(payload);
+        assertEquals(control.action, (byte) 2);
+        assertEquals(control.peerId, "peer-id");
+        assertEquals(control.peerName, "Alex");
+    }
 }
