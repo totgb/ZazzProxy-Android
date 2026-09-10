@@ -1,9 +1,5 @@
 package com.totgb.zazzproxy.ui;
 
-import android.content.Intent;
-import android.database.Cursor;
-import android.net.Uri;
-import android.provider.OpenableColumns;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -163,11 +159,11 @@ public class ServerFragment extends Fragment {
         pickFilesBtn.setTextColor(android.graphics.Color.WHITE);
         pickFilesBtn.setBackgroundColor(android.graphics.Color.rgb(22, 145, 105));
         pickFilesBtn.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("*/*");
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            startActivityForResult(intent, 1001);
+            if (getActivity() instanceof MainActivity) {
+                MainActivity activity = (MainActivity) getActivity();
+                activity.showFilePicker(true, files ->
+                        activity.hostFiles(files, this::refreshHostedFiles));
+            }
         });
         addSpaced(bottomHalf, pickFilesBtn, 52);
         MacMotionButton sendHosted = new MacMotionButton(requireContext());
@@ -462,33 +458,6 @@ public class ServerFragment extends Fragment {
             peers.remove(peer.id);
             refreshPeers();
         }
-    }
-
-    @Override
-    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != 1001 || resultCode != android.app.Activity.RESULT_OK || data == null) return;
-        if (data.getClipData() != null) {
-            for (int i = 0; i < data.getClipData().getItemCount(); i++) addDocument(data.getClipData().getItemAt(i).getUri());
-        } else if (data.getData() != null) {
-            addDocument(data.getData());
-        }
-    }
-
-    private void addDocument(Uri uri) {
-        if (!(getActivity() instanceof MainActivity)) return;
-        try { requireContext().getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (SecurityException ignored) { }
-        ((MainActivity) getActivity()).hostDocument(uri, documentName(uri), this::refreshHostedFiles);
-    }
-
-    private String documentName(Uri uri) {
-        try (Cursor cursor = requireContext().getContentResolver().query(uri, null, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (index >= 0) return cursor.getString(index);
-            }
-        }
-        return "shared-file";
     }
 
     private void refreshHostedFiles() {

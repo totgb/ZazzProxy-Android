@@ -25,6 +25,7 @@ import com.totgb.zazzproxy.archive.ZazzArchive;
 import com.totgb.zazzproxy.model.FileInfo;
 import com.totgb.zazzproxy.model.Peer;
 import com.totgb.zazzproxy.network.ZazzUdpNode;
+import com.totgb.zazzproxy.network.HostedFileService;
 import com.totgb.zazzproxy.service.SessionCoordinator;
 import com.totgb.zazzproxy.service.ZazzBackgroundService;
 import com.totgb.zazzproxy.settings.ProfileAvatarStore;
@@ -41,7 +42,7 @@ import java.io.ByteArrayInputStream;
 /** Purpose-built LAN sharing dashboard. All layout is created in Java. */
 public class MainActivity extends AppCompatActivity {
     private static final int EXPORT_CATALOG = 41, IMPORT_CATALOG = 42, EXPORT_SETTINGS = 43, IMPORT_SETTINGS = 44,
-            PICK_CLIENT_AVATAR = 45, PICK_SERVER_AVATAR = 46, PICK_CLIENT_FILES = 47;
+            PICK_CLIENT_AVATAR = 45, PICK_SERVER_AVATAR = 46;
     private FrameLayout content;
     private ZazzUdpNode node;
     private SessionCoordinator.Role role;
@@ -64,6 +65,8 @@ public class MainActivity extends AppCompatActivity {
     private final android.os.Handler incomingOfferHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable incomingOfferDialog = this::showIncomingOffers;
     private final java.util.Map<String, List<FileInfo>> receivedManifests = new java.util.LinkedHashMap<>();
+    private final java.util.Set<String> requestedDownloads = new java.util.HashSet<>();
+    private final java.util.Set<String> completedDownloads = new java.util.HashSet<>();
     private final java.util.List<ZazzArchive.DownloadRecord> downloadedRecords = new java.util.ArrayList<>();
     private boolean transferredInSession;
     private LinearLayout transferPanel;
@@ -349,19 +352,114 @@ public class MainActivity extends AppCompatActivity {
     private void downloadedPage() {
         updateActivePage("DOWNLOADED");
         LinearLayout page = page();
-        page.addView(eyebrow("DOWNLOAD HISTORY"));
-        page.addView(title("Downloaded files."));
-        page.addView(subtitle("Completed files verified on this device."));
-        if (downloadedRecords.isEmpty()) {
-            page.addView(subtitle("No completed downloads yet."));
+        page.addView(eyebrow("DOWNLOADS"));
+        page.addView(title("Files on this device."));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                && !android.os.Environment.isExternalStorageManager()) {
+            page.addView(subtitle("Direct file access is disabled. Enable it to save and manage downloads."));
+            page.addView(action("ENABLE FILE ACCESS", "Allow ZazzProxy to write Download/zaZzProxy directly.",
+                    v -> requestStorageAccess()));
+        }
+        File folder = currentDownloadFolder();
+        page.addView(subtitle(folder == null
+                ? "No server download folder exists yet."
+                : folder.getAbsolutePath()));
+        if (folder == null) {
+            page.addView(subtitle("Accept a transfer to create a server folder."));
         } else {
-            for (ZazzArchive.DownloadRecord record : downloadedRecords) {
-                page.addView(subtitle(record.name + "\n" + record.path));
+            List<File> files = HostedFileService.filesIn(folder);
+            if (files.isEmpty()) {
+                page.addView(subtitle("This folder is empty."));
+            } else {
+                for (File file : files) {
+                    page.addView(action(file.getName(),
+                            readableBytes(file.length()) + "  •  " + file.getAbsolutePath(),
+                            v -> showFileActions(file)));
+                }
             }
         }
-        page.addView(action("OPEN DOWNLOADS", "Browse the Download/zaZzProxy folder.",
-                v -> openDownloadsFolder()));
+        page.addView(action("REFRESH DOWNLOADS", "Re-read this server folder from disk.",
+                v -> downloadedPage()));
+        page.addView(eyebrow("HISTORY"));
+        for (ZazzArchive.DownloadRecord record : downloadedRecords) {
+            page.addView(subtitle(record.name + "\n" + record.path));
+        }
         put(page);
+    }
+
+    private File currentDownloadFolder() {
+        String serverName = connectedServer == null ? null : connectedServer.name;
+        if (serverName == null || serverName.trim().isEmpty()) {
+            if (!downloadedRecords.isEmpty()) {
+                File parent = new File(downloadedRecords.get(0).path).getParentFile();
+                if (parent != null && parent.isDirectory()) return parent;
+            }
+            File root = HostedFileService.publicDownloadRoot();
+            File[] folders = root.listFiles(File::isDirectory);
+            return folders == null || folders.length == 0 ? null : folders[0];
+        }
+        File folder = new File(HostedFileService.publicDownloadRoot(),
+                HostedFileService.safeName(serverName));
+        return folder.isDirectory() ? folder : null;
+    }
+
+    private String readableBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024) + " KB";
+        return (bytes / (1024 * 1024)) + " MB";
+    }
+
+    private void showFileActions(File file) {
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        MaterialCardView card = new MaterialCardView(this);
+        card.setRadius(dp(24));
+        card.setCardBackgroundColor(Color.rgb(29, 38, 61));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(22), dp(20), dp(22), dp(20));
+        body.addView(titleSmall(file.getName()));
+        body.addView(subtitle(file.getAbsolutePath() + "\n" + readableBytes(file.length())));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        MacMotionButton close = new MacMotionButton(this);
+        close.setText("CLOSE");
+        close.setOnClickListener(v -> dialog.dismiss());
+        MacMotionButton open = new MacMotionButton(this);
+        open.setText("OPEN FILE");
+        open.setTextColor(Color.WHITE);
+        open.setBackgroundColor(Color.rgb(49, 103, 213));
+        open.setOnClickListener(v -> {
+            try {
+                android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                        this, getPackageName() + ".files", file);
+                Intent intent = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "*/*");
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(intent, "Open with"));
+            } catch (Exception error) {
+                MacToast.show(this, "No application can open this file", false);
+            }
+        });
+        MacMotionButton delete = new MacMotionButton(this);
+        delete.setText("DELETE");
+        delete.setTextColor(Color.WHITE);
+        delete.setBackgroundColor(Color.rgb(150, 61, 78));
+        delete.setOnClickListener(v -> {
+            if (!file.delete()) MacToast.show(this, "Could not delete " + file.getName(), false);
+            else {
+                MacToast.show(this, "File deleted", true);
+                dialog.dismiss();
+                downloadedPage();
+            }
+        });
+        actions.addView(close);
+        actions.addView(open);
+        actions.addView(delete);
+        body.addView(actions);
+        card.addView(body);
+        dialog.setContentView(card);
+        if (dialog.getWindow() != null) dialog.getWindow().setBackgroundDrawable(
+                new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        dialog.show();
     }
 
     private View modeCard(String badge, String heading, String detail, String action, boolean server) {
@@ -497,10 +595,18 @@ public class MainActivity extends AppCompatActivity {
         chooseFiles.setText("CHOOSE FILES TO SEND");
         chooseFiles.setTextColor(Color.WHITE);
         chooseFiles.setBackgroundColor(Color.rgb(49, 103, 213));
-        chooseFiles.setOnClickListener(v -> startActivityForResult(
-                new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
-                        .addCategory(Intent.CATEGORY_OPENABLE)
-                        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true), PICK_CLIENT_FILES));
+        chooseFiles.setOnClickListener(v -> showFilePicker(true, files -> {
+            pendingClientFiles.clear();
+            StringBuilder names = new StringBuilder("Selected files:\n");
+            for (File file : files) {
+                File copy = copyClientFile(file);
+                if (copy != null) {
+                    pendingClientFiles.add(copy);
+                    names.append("• ").append(copy.getName()).append('\n');
+                }
+            }
+            if (clientSelectedFiles != null) clientSelectedFiles.setText(names.toString());
+        }));
         page.addView(chooseFiles, new LinearLayout.LayoutParams(-1, dp(52)));
         clientSelectedFiles = subtitle("No files selected for sending.");
         page.addView(clientSelectedFiles);
@@ -533,9 +639,18 @@ public class MainActivity extends AppCompatActivity {
     private void showServerPage(String page) {
         androidx.fragment.app.Fragment fragment =
                 getSupportFragmentManager().findFragmentById(content.getId());
-        if (fragment instanceof ServerFragment) {
+        if (fragment instanceof ServerFragment
+                && fragment.getView() != null
+                && fragment.getView().getParent() == content) {
             ((ServerFragment) fragment).showPage(page);
+            return;
         }
+        // The downloaded page is a normal activity view and temporarily replaces
+        // the server fragment. Recreate the live server surface when navigating back.
+        getSupportFragmentManager().beginTransaction()
+                .replace(content.getId(), new ServerFragment())
+                .runOnCommit(() -> showServerPage(page))
+                .commit();
     }
 
     private View profileHeader(boolean server) {
@@ -877,8 +992,19 @@ public class MainActivity extends AppCompatActivity {
                 transferredInSession = true;
                 runOnUiThread(() -> {
                     finishTransfer(file.getName());
+                    MacToast.show(MainActivity.this, "Download completed: " + file.getName(), true);
+                    if (role == SessionCoordinator.Role.CLIENT) {
+                        for (List<FileInfo> files : receivedManifests.values()) {
+                            for (FileInfo info : files) {
+                                if (info.name.equals(file.getName())) completedDownloads.add(info.id);
+                            }
+                        }
+                        if (connectedServer != null) showFiles(connectedServer,
+                                receivedManifests.getOrDefault(connectedServer.id, Collections.emptyList()));
+                    }
                     showTransferSuccess();
                 });
+                ensureConnectionNotification();
                 if (role == SessionCoordinator.Role.CLIENT) recordCompletedDownload(file);
                 androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
                 if (fragment instanceof ServerFragment) {
@@ -1031,10 +1157,26 @@ public class MainActivity extends AppCompatActivity {
                 clientFiles.addView(subtitle("This server has no hosted files yet."));
                 return;
             }
+            MacMotionButton downloadAll = new MacMotionButton(this);
+            downloadAll.setText("DOWNLOAD ALL FILES");
+            downloadAll.setTextColor(Color.WHITE);
+            downloadAll.setBackgroundColor(Color.rgb(22, 145, 105));
+            downloadAll.setOnClickListener(v -> {
+                for (FileInfo file : files) {
+                    if (!completedDownloads.contains(file.id)) {
+                        requestedDownloads.add(file.id);
+                        node.requestDownload(peer, file);
+                    }
+                }
+                MacToast.show(this, "All available downloads started", true);
+            });
+            clientFiles.addView(downloadAll, new LinearLayout.LayoutParams(-1, dp(50)));
             for (FileInfo file : files) {
+                if (completedDownloads.contains(file.id)) continue;
                 MacMotionButton download = new MacMotionButton(this);
                 download.setText("DOWNLOAD  " + file.name);
                 download.setOnClickListener(v -> {
+                    requestedDownloads.add(file.id);
                     node.requestDownload(peer, file);
                     MacToast.show(this, "Download started", true);
                 });
@@ -1073,16 +1215,8 @@ public class MainActivity extends AppCompatActivity {
                 .setTitle("Download complete")
                 .setMessage(message.toString())
                 .setNegativeButton("CLOSE", null)
-                .setPositiveButton("OPEN DOWNLOADS", (dialog, which) -> openDownloadsFolder())
+                .setPositiveButton("VIEW DOWNLOADS", (dialog, which) -> downloadedPage())
                 .show();
-    }
-
-    private void openDownloadsFolder() {
-        try {
-            startActivity(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE));
-        } catch (Exception error) {
-            MacToast.show(this, "Could not open the file browser", false);
-        }
     }
 
     public void ensureConnectionNotification() {
@@ -1249,6 +1383,38 @@ public class MainActivity extends AppCompatActivity {
             catch (Exception error) { MacToast.show(this, error.getMessage(), false); }
         }).start();
     }
+
+    public void showFilePicker(boolean multiple, FilePickerDialog.Callback callback) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && !android.os.Environment.isExternalStorageManager()) {
+                requestStorageAccess();
+                MacToast.show(this, "Enable direct file access, then open the picker again", false);
+                return;
+            }
+            new FilePickerDialog(this, multiple, callback).show();
+        }
+
+    public void hostFiles(List<File> files, Runnable done) {
+            if (node == null || role != SessionCoordinator.Role.SERVER) {
+                MacToast.show(this, "Start server mode before adding files", false);
+                return;
+            }
+            new Thread(() -> {
+                try {
+                    for (File file : files) {
+                        if (!file.isFile() || !file.canRead()) {
+                            throw new java.io.IOException("Cannot read " + file.getAbsolutePath());
+                        }
+                        try (InputStream input = new java.io.FileInputStream(file)) {
+                            node.hostCopy(input, file.getName());
+                        }
+                    }
+                    runOnUiThread(done);
+                } catch (Exception error) {
+                    runOnUiThread(() -> MacToast.show(this, error.getMessage(), false));
+                }
+            }).start();
+        }
 
     public void removeHostedFile(String name, Runnable done) {
         if (node == null) return;
@@ -1614,42 +1780,20 @@ public class MainActivity extends AppCompatActivity {
             else if (code == IMPORT_CATALOG) try (InputStream in = getContentResolver().openInputStream(data.getData())) { MacToast.show(this, "Imported " + ZazzArchive.importManifest(in).size() + " files", true); }
             else if (code == PICK_CLIENT_AVATAR) { ProfileAvatarStore.save(this, data.getData(), false); MacToast.show(this, "Client profile picture saved", true); }
             else if (code == PICK_SERVER_AVATAR) { ProfileAvatarStore.save(this, data.getData(), true); MacToast.show(this, "Server profile picture saved", true); }
-            else if (code == PICK_CLIENT_FILES) {
-                StringBuilder names = new StringBuilder("Selected files:\n");
-                if (data.getClipData() != null) {
-                    for (int i = 0; i < data.getClipData().getItemCount(); i++) {
-                        File file = copyClientFile(data.getClipData().getItemAt(i).getUri());
-                        if (file != null) {
-                            pendingClientFiles.add(file);
-                            names.append("• ").append(file.getName()).append('\n');
-                        }
-                    }
-                } else if (data.getData() != null) {
-                    File file = copyClientFile(data.getData());
-                    if (file != null) {
-                        pendingClientFiles.add(file);
-                        names.append("• ").append(file.getName()).append('\n');
-                    }
-                }
-                if (clientSelectedFiles != null) clientSelectedFiles.setText(names.toString());
-                MacToast.show(this, "Files selected for sending", true);
-            }
         } catch (Exception error) { MacToast.show(this, "Binary archive failed", false); }
     }
 
-    private File copyClientFile(Uri uri) {
-        String name = uri.getLastPathSegment() == null ? "shared-file" : uri.getLastPathSegment();
-        name = name.replaceAll("[/\\\\]", "_");
-        File target = new File(getCacheDir(), "send-" + System.nanoTime() + "-" + name);
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             OutputStream output = new java.io.FileOutputStream(target)) {
-            if (input == null) throw new java.io.IOException("Could not open selected file");
-            byte[] buffer = new byte[8192];
-            for (int count; (count = input.read(buffer)) >= 0;) output.write(buffer, 0, count);
-            return target;
-        } catch (Exception error) {
-            MacToast.show(this, "Could not prepare selected file", false);
-            return null;
+    private File copyClientFile(File source) {
+            File target = new File(getCacheDir(), "send-" + System.nanoTime() + "-"
+                    + source.getName().replaceAll("[/\\\\]", "_"));
+            try (InputStream input = new java.io.FileInputStream(source);
+                 OutputStream output = new java.io.FileOutputStream(target)) {
+                byte[] buffer = new byte[8192];
+                for (int count; (count = input.read(buffer)) >= 0; ) output.write(buffer, 0, count);
+                return target;
+            } catch (Exception error) {
+                MacToast.show(this, "Could not prepare " + source.getName(), false);
+                return null;
         }
     }
     private void applyTheme(String theme) {

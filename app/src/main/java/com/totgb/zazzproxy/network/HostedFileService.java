@@ -19,7 +19,7 @@ import java.util.Collections;
 import java.util.List;
 
 /** Owns the app-controlled hosted catalog and transfer directories. */
-final class HostedFileService {
+public final class HostedFileService {
     private final String nodeName;
     private final File hostedDir;
     private final File downloadDir;
@@ -34,14 +34,39 @@ final class HostedFileService {
     }
 
     File hostedDir() { return hostedDir; }
-    File downloadDirectory(String name) {
+    public File downloadDirectory(String name) {
         File directory = new File(ensureDownloadDirectory(), safeName(name));
         if (!directory.exists() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create server download folder");
         }
         return directory;
     }
-    File uploadDirectory(String name) { return ensureDownloadDirectory(); }
+    public File uploadDirectory(String name) { return ensureDownloadDirectory(); }
+
+    public File downloadRoot() { return ensureDownloadDirectory(); }
+
+    public static File publicDownloadRoot() {
+        return new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS), "zaZzProxy");
+    }
+
+    public static File publicDownloadDirectory(String name) {
+        File directory = new File(publicDownloadRoot(), safeName(name));
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("Could not create server download folder: "
+                    + directory.getAbsolutePath());
+        }
+        return directory;
+    }
+
+    public static List<File> filesIn(File directory) {
+        File[] files = directory == null ? null : directory.listFiles(File::isFile);
+        if (files == null) return Collections.emptyList();
+        List<File> result = new ArrayList<>();
+        Collections.addAll(result, files);
+        Collections.sort(result, (left, right) -> left.getName().compareToIgnoreCase(right.getName()));
+        return result;
+    }
 
     List<FileInfo> hostedFiles() {
         File[] files = hostedDir.listFiles();
@@ -80,7 +105,7 @@ final class HostedFileService {
         return catalog;
     }
 
-    static String safeName(String name) {
+    public static String safeName(String name) {
         String clean = new File(name == null ? "file" : name).getName().replaceAll("[\\r\\n]", "_");
         return clean.length() == 0 ? "file" : clean;
     }

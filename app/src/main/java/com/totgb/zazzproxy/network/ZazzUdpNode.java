@@ -15,6 +15,7 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
@@ -411,7 +412,8 @@ public final class ZazzUdpNode implements Closeable {
                 in = new Incoming(transfer, from, HostedFileService.uniqueFile(downloadDirectory(serverName), HostedFileService.safeName(f.name)), f, false); receives.put(transfer, in);
                 data = new byte[b.remaining()]; b.get(data);
             }
-            in.write(seq, data); sendRaw(from, ACK, transfer, seq, new byte[0]);
+            if (!in.write(seq, data)) return;
+            sendRaw(from, ACK, transfer, seq, new byte[0]);
             if (in.complete()) {
                 receives.remove(transfer); in.finish();
                 final File completed = in.target;
@@ -449,14 +451,26 @@ public final class ZazzUdpNode implements Closeable {
             this.transfer=transfer;this.peer=peer;this.target=target;this.metadata=metadata;this.upload=upload;
             part = new File(target.getParentFile(), "." + target.getName() + ".part"); if (part.exists()) part.delete();
         }
-        synchronized void write(int sequence, byte[] bytes) throws Exception {
-            if (sequence != expected || received + bytes.length > metadata.bytes) return;
+        synchronized boolean write(int sequence, byte[] bytes) throws Exception {
+            if (sequence != expected || received + bytes.length > metadata.bytes) return false;
             try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(part, true))) { out.write(bytes); }
             received += bytes.length; expected++; final long done = received;
             post(() -> callback.onTransfer(metadata.name, done, metadata.bytes, upload));
+            return true;
         }
         boolean complete() { return received == metadata.bytes; }
-        void finish() throws Exception { if (!sha256(part).equalsIgnoreCase(metadata.sha256)) throw new SecurityException("SHA-256 mismatch"); if (!part.renameTo(target)) throw new Exception("Could not save final file"); }
+        void finish() throws Exception {
+            if (!sha256(part).equalsIgnoreCase(metadata.sha256)) {
+                throw new SecurityException("SHA-256 mismatch");
+            }
+            if (!part.renameTo(target)) {
+                throw new IOException("Could not save final file to " + target.getAbsolutePath());
+            }
+            if (!target.isFile() || target.length() != metadata.bytes) {
+                throw new IOException("Downloaded file was not created correctly at "
+                        + target.getAbsolutePath());
+            }
+        }
     }
     private void sendRaw(InetSocketAddress to, byte type, String transfer, int seq, byte[] plain) {
         transport.send(to, type, transfer, seq, plain);
