@@ -1,12 +1,10 @@
 package com.totgb.zazzproxy.network;
 
 import android.content.Context;
-import android.os.Handler;
-import android.os.Looper;
 import com.totgb.zazzproxy.model.FileInfo;
 import com.totgb.zazzproxy.model.Peer;
+import com.totgb.zazzproxy.archive.ZazzArchive;
 import com.totgb.zazzproxy.network.protocol.BinaryProtocol;
-import com.totgb.zazzproxy.security.Cipher;
 import com.totgb.zazzproxy.security.Integrity;
 import com.totgb.zazzproxy.security.KeyManager;
 import com.totgb.zazzproxy.settings.ProfileAvatarStore;
@@ -17,24 +15,15 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
-import android.os.Environment;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -44,7 +33,6 @@ import javax.crypto.spec.SecretKeySpec;
 /** UDP-only LAN transport. Every payload is AES-GCM encrypted and authenticated. */
 public final class ZazzUdpNode implements Closeable {
     public static final int PORT = 39841;
-    private static final int MAGIC = 0x5A415A5A, VERSION = 1, MAX_PACKET = 1200, CHUNK_BYTES = 800;
     private static final byte HELLO = 1, MANIFEST_REQUEST = 2, MANIFEST = 3,
             DOWNLOAD_REQUEST = 4, FILE_CHUNK = 5, ACK = 6, UPLOAD_OFFER = 7,
             UPLOAD_CHUNK = 8, ERROR = 9, CONTROL = 10, CONNECTION_REQUEST = 11,
@@ -69,36 +57,33 @@ public final class ZazzUdpNode implements Closeable {
     private final boolean advertisedServer;
     private final byte[] avatar;
     private final SecretKeySpec key;
-    private final ExecutorService receiver = Executors.newSingleThreadExecutor();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private final Handler main = new Handler(Looper.getMainLooper());
-    private final Map<String, Peer> peers = new ConcurrentHashMap<>();
-    private final Map<String, Long> peerLastSeen = new ConcurrentHashMap<>();
-    private final java.util.Set<String> bannedNames = ConcurrentHashMap.newKeySet();
+    private final UiDispatcher ui = new UiDispatcher();
+    private final PeerRegistry peerRegistry = new PeerRegistry();
+    private final Map<String, Peer> peers = peerRegistry.peers();
+    private final Map<String, Long> peerLastSeen = peerRegistry.lastSeen();
+    private final java.util.Set<String> bannedNames = peerRegistry.bannedNames();
     private final Map<String, Outgoing> sends = new ConcurrentHashMap<>();
     private final Map<String, Outgoing> pendingSends = new ConcurrentHashMap<>();
     private final Map<String, Incoming> receives = new ConcurrentHashMap<>();
-    private final Map<String, Peer> approvedPeers = new ConcurrentHashMap<>();
-    private final Map<String, Peer> pendingConnections = new ConcurrentHashMap<>();
-    private final File hostedDir, downloadDir;
+    private final Map<String, Peer> approvedPeers = peerRegistry.approved();
+    private final Map<String, Peer> pendingConnections = peerRegistry.pending();
+    private final HostedFileService hostedFiles;
     private volatile boolean running;
-    private DatagramSocket socket;
+    private final UdpTransport transport;
 
     public ZazzUdpNode(Context context, String name, boolean advertisedServer, String sharedKey, Callback callback) throws Exception {
         if (sharedKey == null || sharedKey.trim().length() < 8) throw new IllegalArgumentException("A network key of at least 8 characters is required.");
         this.context = context.getApplicationContext(); this.nodeName = name; this.version = "1.0"; this.advertisedServer = advertisedServer; this.callback = callback;
-        hostedDir = new File(this.context.getFilesDir(), "zazzproxy/shared");
-        downloadDir = new File(Environment.getExternalStorageDirectory(), "zaZzProxy");
-        hostedDir.mkdirs(); downloadDir.mkdirs();
+        hostedFiles = new HostedFileService(this.context, nodeName);
         key = new KeyManager(sharedKey).key();
         avatar = readAvatar(this.context, advertisedServer);
+        transport = new UdpTransport(key, this::handlePacket, this::postFail);
     }
 
     public synchronized void start() throws Exception {
         if (running) return;
-        socket = new DatagramSocket(null); socket.setReuseAddress(true); socket.setBroadcast(true);
-        socket.bind(new InetSocketAddress(advertisedServer ? PORT : 0)); running = true;
-        receiver.execute(this::receiveLoop);
+        transport.start(advertisedServer ? PORT : 0); running = true;
         scheduler.scheduleAtFixedRate(() -> { try { announce(); } catch (Exception ignored) { } }, 0, 4, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::removeExpiredPeers, 2, 2, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::refreshApprovedManifests, 2, 2, TimeUnit.SECONDS);
@@ -107,8 +92,13 @@ public final class ZazzUdpNode implements Closeable {
     public void requestConnection(Peer peer) {
         try {
             InetSocketAddress server = new InetSocketAddress(peer.address().getAddress(), PORT);
-            sendRaw(server, CONNECTION_REQUEST, UUID.randomUUID().toString(), 0,
-                    BinaryProtocol.connectionRequest(nodeId, nodeName));
+            String transfer = UUID.randomUUID().toString();
+            byte[] request = BinaryProtocol.connectionRequest(nodeId, nodeName);
+            sendRaw(server, CONNECTION_REQUEST, transfer, 0, request);
+            scheduler.schedule(() -> sendRaw(server, CONNECTION_REQUEST, transfer, 0, request),
+                    350, TimeUnit.MILLISECONDS);
+            scheduler.schedule(() -> sendRaw(server, CONNECTION_REQUEST, transfer, 0, request),
+                    900, TimeUnit.MILLISECONDS);
         } catch (Exception error) {
             postFail("Could not request connection");
         }
@@ -122,6 +112,11 @@ public final class ZazzUdpNode implements Closeable {
         pendingConnections.remove(peer.id);
         if (accepted) {
             approvedPeers.put(peer.id, peer);
+            try {
+                ZazzArchive.rememberConnection(context, peer);
+            } catch (Exception error) {
+                postFail("Could not save connection history");
+            }
             post(() -> callback.onPeer(peer));
         }
         try {
@@ -136,7 +131,7 @@ public final class ZazzUdpNode implements Closeable {
         if (accepted) {
             try {
                 receives.put(transfer, new Incoming(transfer, peer.address(),
-                        uniqueFile(uploadDirectory(peer.name), safeName(file.name)), file, true));
+                        HostedFileService.uniqueFile(uploadDirectory(peer.name), HostedFileService.safeName(file.name)), file, true));
             } catch (Exception e) {
                 postFail("Could not prepare incoming file");
                 accepted = false;
@@ -151,6 +146,9 @@ public final class ZazzUdpNode implements Closeable {
     }
     public List<Peer> connectedPeers() {
         return new ArrayList<>(advertisedServer ? approvedPeers.values() : peers.values());
+    }
+    public List<Peer> knownPeers() {
+        return new ArrayList<>(peers.values());
     }
     public List<Peer> pendingConnections() {
         return new ArrayList<>(pendingConnections.values());
@@ -172,11 +170,10 @@ public final class ZazzUdpNode implements Closeable {
         } catch (Exception ignored) {
             // Fall back to the socket address below.
         }
-        return socket == null || socket.getLocalAddress() == null
-                ? "" : socket.getLocalAddress().getHostAddress();
+        return transport.localHost();
     }
     public int localPort() {
-        return socket == null ? 0 : socket.getLocalPort();
+        return transport.localPort();
     }
     public String nodeName() {
         return nodeName;
@@ -203,38 +200,26 @@ public final class ZazzUdpNode implements Closeable {
     public void upload(Peer peer, File file) throws Exception {
         if (!file.isFile()) throw new IllegalArgumentException("The selected upload is unavailable.");
         String transfer = UUID.randomUUID().toString();
-        FileInfo metadata = new FileInfo(UUID.randomUUID().toString(), safeName(file.getName()), file.length(), sha256(file));
+        FileInfo metadata = new FileInfo(UUID.randomUUID().toString(), HostedFileService.safeName(file.getName()), file.length(), sha256(file));
         pendingSends.put(transfer, new Outgoing(transfer, peer.address(), file, metadata, true));
         sendRaw(peer.address(), UPLOAD_OFFER, transfer, 0, BinaryProtocol.file(metadata));
     }
     public List<FileInfo> hostedFiles() {
-        File[] files = hostedDir.listFiles(); if (files == null) return Collections.emptyList();
-        List<FileInfo> result = new ArrayList<>();
-        for (File f : files) if (f.isFile() && !f.getName().startsWith(".") && !f.getName().equals("catalog.zaZzProxy")) try {
-            result.add(new FileInfo(f.getName(), f.getName(), f.length(), sha256(f)));
-        } catch (Exception e) { postFail("Cannot read " + f.getName()); }
-        return result;
+        return hostedFiles.hostedFiles();
     }
     /** Copies a selected Android document into the app-controlled server folder. */
     public File hostCopy(java.io.InputStream source, String originalName) throws Exception {
-        File target = uniqueFile(hostedDir, safeName(originalName));
-        copy(source, target); writeManifest(); return target;
+        return hostedFiles.copyToHosted(source, originalName);
     }
-    public File getHostedDir() { return hostedDir; }
+    public File getHostedDir() { return hostedFiles.hostedDir(); }
     /** Removes only a direct child of the controlled server folder. */
     public void removeHostedFile(String name) throws Exception {
-        File file = new File(hostedDir, safeName(name));
-        if (!file.isFile() || !file.delete()) throw new IOException("Could not remove " + name);
-        writeManifest();
+        hostedFiles.removeHosted(name);
     }
 
     /** Persists the catalog format that is also transferred as the MANIFEST payload. */
     public File writeManifest() throws Exception {
-        File catalog = new File(hostedDir, "catalog.zaZzProxy");
-        try (FileOutputStream output = new FileOutputStream(catalog, false)) {
-            output.write(BinaryProtocol.manifest(nodeName, hostedFiles()));
-        }
-        return catalog;
+        return hostedFiles.writeManifest();
     }
 
     private void announce() throws Exception {
@@ -262,22 +247,11 @@ public final class ZazzUdpNode implements Closeable {
             sendRaw(target, HELLO, transfer, 0, hello);
         }
     }
-    private void receiveLoop() {
-        byte[] buffer = new byte[MAX_PACKET];
-        while (running) try {
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length); socket.receive(packet);
-            handle(packet);
-        } catch (Exception e) { if (running) postFail("Network listener stopped: " + e.getMessage()); }
-    }
-    private void handle(DatagramPacket packet) throws Exception {
-        ByteBuffer input = ByteBuffer.wrap(packet.getData(), 0, packet.getLength());
-        if (input.remaining() < 40 || input.getInt() != MAGIC || input.get() != VERSION) return;
-        byte type = input.get(); UUID id = new UUID(input.getLong(), input.getLong()); int seq = input.getInt(); int length = input.getShort() & 0xffff;
-        if (length > input.remaining() || length < 28) return;
-        byte[] encrypted = new byte[length]; input.get(encrypted);
-        byte[] payload = decrypt(type, id, seq, encrypted);
-        InetSocketAddress from = new InetSocketAddress(packet.getAddress(), packet.getPort());
-        String transfer = id.toString();
+    private void handlePacket(InetSocketAddress from, UdpTransport.Packet packet) throws Exception {
+        byte type = packet.type;
+        int seq = packet.sequence;
+        byte[] payload = packet.payload;
+        String transfer = packet.id.toString();
         if (type == FILE_CHUNK || type == UPLOAD_CHUNK) { receiveChunk(from, transfer, seq, payload); return; }
         if (type == ACK) { Outgoing send = sends.get(transfer); if (send != null) send.ack(seq); return; }
         switch (type) {
@@ -301,12 +275,21 @@ public final class ZazzUdpNode implements Closeable {
         Peer peer = new Peer(hello.id, hello.name, hello.version, hello.server, from, hello.avatar);
         Peer old = peers.put(peer.id, peer);
         peerLastSeen.put(peer.id, System.currentTimeMillis());
+        for (Peer saved : ZazzArchive.loadConnections(context)) {
+            if (saved.id.equals(peer.id)) {
+                approvedPeers.put(peer.id, peer);
+                break;
+            }
+        }
         if (advertisedServer && !hello.server) {
             sendRaw(from, HELLO, UUID.randomUUID().toString(), 0,
                     BinaryProtocol.hello(nodeId, nodeName, version, true, avatar));
         }
-        if (!advertisedServer || peer.server) {
-            if (old == null || !old.host.equals(peer.host)) post(() -> callback.onPeer(peer));
+        if (!peer.server || old == null
+                || !old.host.equals(peer.host)
+                || old.address().getPort() != peer.address().getPort()
+                || old.server != peer.server) {
+            post(() -> callback.onPeer(peer));
         }
     }
 
@@ -395,14 +378,15 @@ public final class ZazzUdpNode implements Closeable {
         } catch (Exception e) { postFail("Invalid .zaZzproxy manifest received"); }
     }
     private void startDownload(InetSocketAddress to, String transfer, String fileId) {
-        File file = new File(hostedDir, safeName(fileId));
+        File file = new File(hostedFiles.hostedDir(), HostedFileService.safeName(fileId));
         if (!file.isFile()) { sendError(to, transfer, "Requested file is unavailable"); return; }
         try { sends.put(transfer, new Outgoing(transfer, to, file, new FileInfo(file.getName(), file.getName(), file.length(), sha256(file)), false)); }
         catch (Exception e) { sendError(to, transfer, "Cannot read requested file"); }
     }
     private void acceptUpload(InetSocketAddress from, String transfer, FileInfo file) {
         try {
-            receives.put(transfer, new Incoming(transfer, from, uniqueFile(hostedDir, safeName(file.name)), file, true));
+            receives.put(transfer, new Incoming(transfer, from,
+                    HostedFileService.uniqueFile(hostedFiles.hostedDir(), HostedFileService.safeName(file.name)), file, true));
         } catch (Exception e) { sendError(from, transfer, "Cannot accept upload"); }
     }
     private void receiveChunk(InetSocketAddress from, String transfer, int seq, byte[] data) {
@@ -414,7 +398,7 @@ public final class ZazzUdpNode implements Closeable {
                 byte[] meta = new byte[metaLength]; b.get(meta); FileInfo f = BinaryProtocol.readFile(meta);
                 Peer server = findPeer(from);
                 String serverName = server == null ? "Server" : server.name;
-                in = new Incoming(transfer, from, uniqueFile(downloadDirectory(serverName), safeName(f.name)), f, false); receives.put(transfer, in);
+                in = new Incoming(transfer, from, HostedFileService.uniqueFile(downloadDirectory(serverName), HostedFileService.safeName(f.name)), f, false); receives.put(transfer, in);
                 data = new byte[b.remaining()]; b.get(data);
             }
             in.write(seq, data); sendRaw(from, ACK, transfer, seq, new byte[0]);
@@ -434,17 +418,17 @@ public final class ZazzUdpNode implements Closeable {
         Outgoing(String transfer, InetSocketAddress peer, File file, FileInfo metadata, boolean upload) { this.transfer=transfer; this.peer=peer; this.file=file; this.metadata=metadata; this.upload=upload; }
         synchronized void ack(int sequence) { acknowledged = Math.max(acknowledged, sequence); }
         synchronized void pump() throws Exception {
-            int chunks = Math.max(1, (int) ((metadata.bytes + CHUNK_BYTES - 1) / CHUNK_BYTES));
+            int chunks = Math.max(1, (int) ((metadata.bytes + FileTransfer.CHUNK_BYTES - 1) / FileTransfer.CHUNK_BYTES));
             if (acknowledged >= chunks - 1) { sends.remove(transfer); return; }
             if (sent > acknowledged && System.currentTimeMillis() - lastSent < 700) return;
-            sent = acknowledged + 1; long offset = (long) sent * CHUNK_BYTES;
-            byte[] content = readRange(file, offset, (int) Math.min(CHUNK_BYTES, metadata.bytes - offset));
+            sent = acknowledged + 1; long offset = (long) sent * FileTransfer.CHUNK_BYTES;
+            byte[] content = readRange(file, offset, (int) Math.min(FileTransfer.CHUNK_BYTES, metadata.bytes - offset));
             if (!upload && sent == 0) {
                 byte[] info = BinaryProtocol.file(metadata);
                 ByteBuffer b = ByteBuffer.allocate(2 + info.length + content.length).putShort((short) info.length).put(info).put(content); content = b.array();
             }
             sendRaw(peer, upload ? UPLOAD_CHUNK : FILE_CHUNK, transfer, sent, content); lastSent = System.currentTimeMillis();
-            final long done = Math.min(metadata.bytes, offset + Math.min(CHUNK_BYTES, metadata.bytes - offset));
+            final long done = Math.min(metadata.bytes, offset + Math.min(FileTransfer.CHUNK_BYTES, metadata.bytes - offset));
             post(() -> callback.onTransfer(metadata.name, done, metadata.bytes, upload));
         }
     }
@@ -464,24 +448,10 @@ public final class ZazzUdpNode implements Closeable {
         boolean complete() { return received == metadata.bytes; }
         void finish() throws Exception { if (!sha256(part).equalsIgnoreCase(metadata.sha256)) throw new SecurityException("SHA-256 mismatch"); if (!part.renameTo(target)) throw new Exception("Could not save final file"); }
     }
-    private synchronized void sendRaw(InetSocketAddress to, byte type, String transfer, int seq, byte[] plain) {
-        try {
-            if (!running || socket == null || socket.isClosed()) throw new IOException("Network socket is not running");
-            UUID id = UUID.fromString(transfer);
-            byte[] cipher = encrypt(type, id, seq, plain);
-            ByteBuffer packet = ByteBuffer.allocate(4 + 1 + 1 + 16 + 4 + 2 + cipher.length)
-                    .putInt(MAGIC).put((byte) VERSION).put(type)
-                    .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits())
-                    .putInt(seq).putShort((short) cipher.length).put(cipher);
-            socket.send(new DatagramPacket(packet.array(), packet.position(), to));
-        } catch (Exception error) {
-            postFail("Unable to send packet to " + to.getAddress().getHostAddress() + ":"
-                    + to.getPort() + " (" + error.getMessage() + ")");
-        }
+    private void sendRaw(InetSocketAddress to, byte type, String transfer, int seq, byte[] plain) {
+        transport.send(to, type, transfer, seq, plain);
     }
     private void sendError(InetSocketAddress to, String transfer, String message) { try { sendRaw(to, ERROR, transfer, 0, BinaryProtocol.error(message)); } catch (Exception e) { postFail("Unable to send error response"); } }
-    private byte[] encrypt(byte type, UUID id, int seq, byte[] plain) throws Exception { return Cipher.encrypt(key, type, id, seq, plain); }
-    private byte[] decrypt(byte type, UUID id, int seq, byte[] ciphertext) throws Exception { return Cipher.decrypt(key, type, id, seq, ciphertext); }
     private static String sha256(File file) throws Exception { try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(file))) { return Integrity.sha256(in); } }
     private static byte[] readAvatar(Context context, boolean server) {
         try {
@@ -496,29 +466,19 @@ public final class ZazzUdpNode implements Closeable {
             return new byte[0];
         }
     }
-    private static void copy(java.io.InputStream input, File target) throws Exception { try(BufferedInputStream in=new BufferedInputStream(input);BufferedOutputStream out=new BufferedOutputStream(new FileOutputStream(target))){byte[]b=new byte[8192];for(int n;(n=in.read(b))>=0;)out.write(b,0,n);} }
     private static byte[] readRange(File file,long offset,int length)throws Exception{byte[] result=new byte[length];try(java.io.RandomAccessFile in=new java.io.RandomAccessFile(file,"r")){in.seek(offset);in.readFully(result);}return result;}
-    private static String safeName(String name) { String clean = new File(name == null ? "file" : name).getName().replaceAll("[\\r\\n]", "_"); return clean.length() == 0 ? "file" : clean; }
-    private static File uniqueFile(File directory, String name) { File result=new File(directory,name);int i=1;int dot=name.lastIndexOf('.');while(result.exists()){String stem=dot>0?name.substring(0,dot):name;String ext=dot>0?name.substring(dot):"";result=new File(directory,stem+" ("+(i++)+")"+ext);}return result; }
     private File uploadDirectory(String clientName) {
-        File directory = new File(downloadDir, safeName(clientName));
-        if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("Could not create transfer folder");
-        return directory;
+        return hostedFiles.uploadDirectory(clientName);
     }
     private File downloadDirectory(String serverName) {
-        File directory = new File(downloadDir, safeName(serverName));
-        if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("Could not create transfer folder");
-        return directory;
+        return hostedFiles.downloadDirectory(serverName);
     }
-    private void post(Runnable runnable) { main.post(runnable); } private void postFail(String message) { post(() -> callback.onFailure(message)); }
+    private void post(Runnable runnable) { ui.post(runnable); } private void postFail(String message) { post(() -> callback.onFailure(message)); }
     @Override public synchronized void close() {
         running = false;
         peerLastSeen.clear();
-        peers.clear();
-        approvedPeers.clear();
-        pendingConnections.clear();
-        if (socket != null) socket.close();
-        receiver.shutdownNow();
+        peerRegistry.clear();
+        transport.close();
         scheduler.shutdownNow();
     }
 }

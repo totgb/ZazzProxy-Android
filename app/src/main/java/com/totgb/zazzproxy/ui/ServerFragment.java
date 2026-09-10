@@ -24,12 +24,14 @@ import com.totgb.zazzproxy.settings.ProfileAvatarStore;
 public class ServerFragment extends Fragment {
     private TextView fileListContent;
     private TextView removeHint;
+    private TextView serverIdentity;
     private LinearLayout peerList;
     private LinearLayout requestList;
     private LinearLayout transferPanel;
     private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, TextView> transferLabels = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, com.totgb.zazzproxy.model.Peer> peers = new java.util.LinkedHashMap<>();
+    private final java.util.Set<String> requestedPeers = new java.util.HashSet<>();
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
@@ -49,6 +51,10 @@ public class ServerFragment extends Fragment {
         layout.setPadding(dp(24), dp(18), dp(24), dp(24));
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
         layout.setMinimumHeight(dp(900));
+        LinearLayout topHalf = new LinearLayout(getContext());
+        topHalf.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout bottomHalf = new LinearLayout(getContext());
+        bottomHalf.setOrientation(LinearLayout.VERTICAL);
 
         ImageView profile = new ImageView(requireContext());
         profile.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -64,23 +70,24 @@ public class ServerFragment extends Fragment {
         android.graphics.Bitmap profileBitmap = android.graphics.BitmapFactory.decodeFile(
                 ProfileAvatarStore.avatar(requireContext(), true).getAbsolutePath());
         profile.setImageBitmap(profileBitmap);
-        layout.addView(profile, new LinearLayout.LayoutParams(dp(64), dp(64)));
+        topHalf.addView(profile, new LinearLayout.LayoutParams(dp(64), dp(64)));
 
         TextView title = new TextView(getContext());
         title.setText("Server Mode Active");
         title.setTextSize(26);
         title.setGravity(Gravity.CENTER);
-        layout.addView(title);
+        topHalf.addView(title);
 
         TextView subtitle = new TextView(getContext());
         String endpoint = getActivity() instanceof MainActivity
                 ? ((MainActivity) getActivity()).localHost() + ":" + ((MainActivity) getActivity()).localPort()
                 : "";
+        serverIdentity = subtitle;
         subtitle.setText("Server: " + (getActivity() instanceof MainActivity
                 ? ((MainActivity) getActivity()).nodeName() : "ZazzProxy")
                 + "\n" + endpoint + "\nSelect files to make them available to peers.");
         subtitle.setPadding(0, 16, 0, 48);
-        layout.addView(subtitle);
+        topHalf.addView(subtitle);
 
         MacMotionButton stopServerButton = new MacMotionButton(requireContext());
         stopServerButton.setText("STOP CURRENT SESSION");
@@ -91,17 +98,27 @@ public class ServerFragment extends Fragment {
                 ((MainActivity) getActivity()).returnHome();
             }
         });
-        addSpaced(layout, stopServerButton, 52);
+        addSpaced(topHalf, stopServerButton, 52);
+        MacMotionButton transferButton = new MacMotionButton(requireContext());
+        transferButton.setText("OPEN TRANSFERS");
+        transferButton.setTextColor(android.graphics.Color.WHITE);
+        transferButton.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
+        transferButton.setOnClickListener(v -> {
+            if (getActivity() instanceof MainActivity) {
+                ((MainActivity) getActivity()).openTransferPage();
+            }
+        });
+        addSpaced(topHalf, transferButton, 48);
 
         TextView peersTitle = new TextView(getContext());
         peersTitle.setText("Clients nearby");
         peersTitle.setTextSize(19);
         peersTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         peersTitle.setPadding(0, dp(28), 0, dp(8));
-        layout.addView(peersTitle);
+        topHalf.addView(peersTitle);
         peerList = new LinearLayout(getContext());
         peerList.setOrientation(LinearLayout.VERTICAL);
-        layout.addView(peerList);
+        topHalf.addView(peerList);
         requestList = new LinearLayout(getContext());
         requestList.setOrientation(LinearLayout.VERTICAL);
         LinearLayout requestsHeading = new LinearLayout(getContext());
@@ -118,8 +135,8 @@ public class ServerFragment extends Fragment {
         refreshRequests.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
         refreshRequests.setOnClickListener(v -> refreshRequests());
         requestsHeading.addView(refreshRequests, new LinearLayout.LayoutParams(dp(100), dp(44)));
-        layout.addView(requestsHeading);
-        layout.addView(requestList);
+        bottomHalf.addView(requestsHeading);
+        bottomHalf.addView(requestList);
         transferPanel = new LinearLayout(getContext());
         transferPanel.setOrientation(LinearLayout.VERTICAL);
         TextView transferTitle = new TextView(getContext());
@@ -127,7 +144,7 @@ public class ServerFragment extends Fragment {
         transferTitle.setTextColor(android.graphics.Color.rgb(132, 169, 224));
         transferTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         transferPanel.addView(transferTitle);
-        layout.addView(transferPanel);
+        bottomHalf.addView(transferPanel);
 
         MacMotionButton pickFilesBtn = new MacMotionButton(requireContext());
         pickFilesBtn.setText("Select Files to Host");
@@ -140,29 +157,37 @@ public class ServerFragment extends Fragment {
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
             startActivityForResult(intent, 1001);
         });
-        addSpaced(layout, pickFilesBtn, 52);
+        addSpaced(topHalf, pickFilesBtn, 52);
 
         // 3. File List Area (This will now grow without covering buttons)
         TextView fileListHeader = new TextView(getContext());
         fileListHeader.setText("\nCurrently Hosting:");
         fileListHeader.setTypeface(null, android.graphics.Typeface.BOLD);
-        layout.addView(fileListHeader);
+        topHalf.addView(fileListHeader);
 
         fileListContent = new TextView(getContext());
         fileListContent.setText("No files selected.");
         fileListContent.setPadding(0, dp(12), 0, dp(4));
         fileListContent.setLineSpacing(dp(4), 1f);
-        layout.addView(fileListContent);
+        topHalf.addView(fileListContent);
         removeHint = new TextView(getContext());
         removeHint.setTextColor(android.graphics.Color.rgb(151, 190, 255));
         removeHint.setTextSize(14);
         removeHint.setPadding(0, 0, 0, dp(18));
         removeHint.setVisibility(View.GONE);
-        layout.addView(removeHint);
+        topHalf.addView(removeHint);
+        TextView separator = new TextView(getContext());
+        separator.setText("TRANSFER AREA");
+        separator.setTextColor(android.graphics.Color.rgb(132, 169, 224));
+        separator.setTypeface(null, android.graphics.Typeface.BOLD);
+        separator.setPadding(0, dp(16), 0, dp(8));
+        layout.addView(topHalf, new LinearLayout.LayoutParams(-1, 0, 1));
+        layout.addView(separator);
+        layout.addView(bottomHalf, new LinearLayout.LayoutParams(-1, 0, 1));
 
         scrollView.addView(layout, new android.widget.ScrollView.LayoutParams(-1, -2));
         if (getActivity() instanceof MainActivity) {
-            for (com.totgb.zazzproxy.model.Peer peer : ((MainActivity) getActivity()).connectedPeers()) {
+            for (com.totgb.zazzproxy.model.Peer peer : ((MainActivity) getActivity()).knownPeers()) {
                 if (!peer.server) peers.put(peer.id, peer);
             }
         }
@@ -186,11 +211,23 @@ public class ServerFragment extends Fragment {
         if (!peer.server) {
             peers.put(peer.id, peer);
             refreshPeers();
+            refreshIdentity();
         }
     }
 
+    private void refreshIdentity() {
+        if (serverIdentity == null || !(getActivity() instanceof MainActivity)) return;
+        MainActivity activity = (MainActivity) getActivity();
+        serverIdentity.setText("Server: " + activity.nodeName()
+                + "\n" + activity.localHost() + ":" + activity.localPort()
+                + "\nSelect files to make them available to peers.");
+    }
+
     public void onConnectionRequest(com.totgb.zazzproxy.model.Peer peer) {
-            refreshRequests();
+        requestedPeers.add(peer.id);
+        peers.put(peer.id, peer);
+        refreshPeers();
+        refreshRequests();
     }
 
         private void refreshRequests() {
@@ -205,6 +242,10 @@ public class ServerFragment extends Fragment {
                 return;
             }
             for (com.totgb.zazzproxy.model.Peer peer : requests) {
+                LinearLayout card = new LinearLayout(getContext());
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(10), dp(10), dp(10), dp(10));
+                card.setBackgroundColor(android.graphics.Color.rgb(29, 38, 61));
                 LinearLayout row = new LinearLayout(getContext());
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 TextView name = new TextView(getContext());
@@ -276,6 +317,10 @@ public class ServerFragment extends Fragment {
             return;
         }
         for (com.totgb.zazzproxy.model.Peer peer : peers.values()) {
+            LinearLayout card = new LinearLayout(getContext());
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(10), dp(10), dp(10), dp(10));
+            card.setBackgroundColor(android.graphics.Color.rgb(29, 38, 61));
             LinearLayout row = new LinearLayout(getContext());
             row.setGravity(Gravity.CENTER_VERTICAL);
             ImageView avatar = peer.avatar.length == 0 ? null : new ImageView(requireContext());
@@ -300,29 +345,57 @@ public class ServerFragment extends Fragment {
             boolean awaiting = false;
             if (getActivity() instanceof MainActivity) {
                 for (com.totgb.zazzproxy.model.Peer request : ((MainActivity) getActivity()).pendingConnectionRequests()) {
-                    if (request.id.equals(peer.id)) {
+                    if (requestedPeers.contains(peer.id) || request.id.equals(peer.id)) {
                         awaiting = true;
                         break;
                     }
                 }
             }
             name.setText("●  " + peer.name + "\n    " + peer.host + ":" + peer.address().getPort()
+                    + "\n    Network key: MATCHED"
                     + "\n    " + (awaiting ? "Awaiting request response" : "Available · awaiting client request"));
             name.setTextSize(16);
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+            MacMotionButton accept = new MacMotionButton(requireContext());
+            accept.setText("ACCEPT");
+            accept.setTextColor(android.graphics.Color.WHITE);
+            accept.setBackgroundColor(android.graphics.Color.rgb(22, 145, 105));
+            accept.setEnabled(awaiting);
+            accept.setAlpha(awaiting ? 1f : .45f);
+            accept.setOnClickListener(v -> {
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).respondToConnectionRequest(peer, true);
+                    requestedPeers.remove(peer.id);
+                    refreshPeers();
+                }
+            });
+            row.addView(accept, new LinearLayout.LayoutParams(0, dp(44), 1));
+            MacMotionButton decline = new MacMotionButton(requireContext());
+            decline.setText("DECLINE");
+            decline.setEnabled(awaiting);
+            decline.setAlpha(awaiting ? 1f : .45f);
+            decline.setOnClickListener(v -> {
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).respondToConnectionRequest(peer, false);
+                    requestedPeers.remove(peer.id);
+                    refreshPeers();
+                }
+            });
+            row.addView(decline, new LinearLayout.LayoutParams(0, dp(44), 1));
             MacMotionButton kick = new MacMotionButton(requireContext());
             kick.setText("KICK");
             kick.setTextColor(android.graphics.Color.WHITE);
             kick.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
             kick.setOnClickListener(v -> managePeer(peer, false));
-            row.addView(kick);
+            row.addView(kick, new LinearLayout.LayoutParams(0, dp(44), 1));
             MacMotionButton ban = new MacMotionButton(requireContext());
             ban.setText("BAN");
             ban.setTextColor(android.graphics.Color.WHITE);
             ban.setBackgroundColor(android.graphics.Color.rgb(150, 61, 78));
             ban.setOnClickListener(v -> managePeer(peer, true));
-            row.addView(ban);
-            peerList.addView(row);
+            row.addView(ban, new LinearLayout.LayoutParams(0, dp(44), 1));
+            card.addView(row);
+            peerList.addView(card, new LinearLayout.LayoutParams(-1, -2));
         }
     }
 

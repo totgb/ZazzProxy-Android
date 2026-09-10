@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory;
 
 import com.totgb.zazzproxy.network.ZazzUdpNode;
 import com.totgb.zazzproxy.model.FileInfo;
+import com.totgb.zazzproxy.model.Peer;
 import com.totgb.zazzproxy.settings.ProfileAvatarStore;
 import org.apache.commons.codec.digest.DigestUtils;
 
@@ -22,6 +23,7 @@ import java.io.EOFException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.net.InetSocketAddress;
 
 /** Versioned binary import/export boundary for the two user-facing Zazz formats. */
 public final class ZazzArchive {
@@ -31,6 +33,7 @@ public final class ZazzArchive {
     private static final int MAX_ENTRIES = 10_000;
     private static final byte[] MANIFEST_MAGIC = "zaZzP".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SETTINGS_MAGIC = "zaZzS".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] CONNECTIONS_MAGIC = "zaZzC".getBytes(StandardCharsets.US_ASCII);
 
     private ZazzArchive() { }
 
@@ -87,6 +90,50 @@ public final class ZazzArchive {
     }
 
     public static String sha256(File file) throws Exception { try (InputStream in = new FileInputStream(file)) { return DigestUtils.sha256Hex(in); } }
+
+    public static synchronized void rememberConnection(Context context, Peer peer) throws Exception {
+        File file = new File(context.getFilesDir(), "connections.zaZzSettings");
+        List<Peer> peers = loadConnections(context);
+        boolean replaced = false;
+        for (int i = 0; i < peers.size(); i++) {
+            if (peers.get(i).id.equals(peer.id)) {
+                peers.set(i, peer);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) peers.add(peer);
+        try (OutputStream output = new FileOutputStream(file, false)) {
+            DataOutputStream out = new DataOutputStream(output);
+            out.write(CONNECTIONS_MAGIC);
+            out.writeInt(1);
+            out.writeInt(peers.size());
+            for (Peer saved : peers) {
+                writeText(out, saved.id); writeText(out, saved.name); writeText(out, saved.version);
+                writeText(out, saved.host); out.writeInt(saved.address().getPort());
+                writeBytes(out, saved.avatar);
+            }
+        }
+    }
+
+    public static synchronized List<Peer> loadConnections(Context context) throws Exception {
+        File file = new File(context.getFilesDir(), "connections.zaZzSettings");
+        if (!file.isFile()) return new ArrayList<>();
+        try (DataInputStream in = new DataInputStream(new FileInputStream(file))) {
+            requireMagic(in, CONNECTIONS_MAGIC);
+            if (in.readInt() != 1) throw new IllegalArgumentException("Unsupported connection archive version");
+            int count = in.readInt();
+            if (count < 0 || count > 1000) throw new IllegalArgumentException("Invalid connection archive");
+            List<Peer> result = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                String id = readText(in), name = readText(in), version = readText(in), host = readText(in);
+                int port = in.readInt();
+                result.add(new Peer(id, name, version, true,
+                        new InetSocketAddress(host, port), readBytes(in)));
+            }
+            return result;
+        }
+    }
     private static void writeText(DataOutputStream out, String value) throws Exception {
         byte[] bytes = (value == null ? "" : value).getBytes(StandardCharsets.UTF_8);
         if (bytes.length > 65_535) throw new IllegalArgumentException("Zazz text field is too large");

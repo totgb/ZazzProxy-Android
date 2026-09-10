@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -51,6 +52,7 @@ public class MainActivity extends AppCompatActivity {
     private View serverCard;
     private MacMotionButton resetButton;
     private TextView searchIndicator;
+    private TextView clientProfileLabel;
     private LinearLayout discoveredServers;
     private LinearLayout clientFiles;
     private Peer connectedServer;
@@ -295,6 +297,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void startServer() {
         if (!begin(SessionCoordinator.Role.SERVER)) return;
+        updateActivePage("CONNECTION");
         if (clientCard != null) clientCard.setVisibility(View.GONE);
         if (serverCard != null) serverCard.setVisibility(View.GONE);
         if (resetButton != null) resetButton.setVisibility(View.GONE);
@@ -308,12 +311,40 @@ public class MainActivity extends AppCompatActivity {
             MacToast.show(this, "Start client or server mode first", false);
             return;
         }
-        updateActivePage("FILES");
+        updateActivePage("CONNECTION");
         if (role == SessionCoordinator.Role.SERVER) {
             getSupportFragmentManager().beginTransaction()
                     .replace(content.getId(), new ServerFragment()).commit();
             return;
         }
+        LinearLayout page = page();
+        page.addView(profileHeader(false));
+        page.addView(eyebrow("CONNECTION"));
+        page.addView(title("Connect to a server."));
+        page.addView(subtitle("Servers nearby are listed below. Choose CONNECT to send a request."));
+        page.addView(sectionLabel("SERVERS AVAILABLE"));
+        discoveredServers = new LinearLayout(this);
+        discoveredServers.setOrientation(LinearLayout.VERTICAL);
+        page.addView(discoveredServers);
+        refreshDiscoveredServers();
+        page.addView(action("OPEN TRANSFERS", "View files, hosting, sending, receiving, and progress.",
+                v -> transferPage()));
+        put(page);
+    }
+
+    private void transferPage() {
+        if (role == null && node == null) {
+            MacToast.show(this, "Start client or server mode first", false);
+            return;
+        }
+
+        updateActivePage("TRANSFER");
+        if (role == SessionCoordinator.Role.SERVER) {
+            // ServerFragment already contains the server transfer area. Reusing it
+            // avoids replacing an active fragment while network callbacks are arriving.
+            return;
+        }
+
         LinearLayout page = page();
         page.addView(profileHeader(false));
         page.addView(eyebrow("FILES"));
@@ -340,7 +371,7 @@ public class MainActivity extends AppCompatActivity {
         page.addView(clientSelectedFiles);
         page.addView(action("SEND SELECTED FILES", "Ask the server to accept these files.",
                 v -> sendSelectedFiles()));
-        page.addView(sectionLabel("CONNECTION REQUESTS"));
+        page.addView(sectionLabel("SERVERS AVAILABLE"));
         discoveredServers = new LinearLayout(this);
         discoveredServers.setOrientation(LinearLayout.VERTICAL);
         page.addView(discoveredServers);
@@ -351,9 +382,13 @@ public class MainActivity extends AppCompatActivity {
         transferPanel = transferPanel();
         page.addView(transferPanel);
         refreshDiscoveredServers();
-        page.addView(action("CLIENT SEARCH", "Listening for servers and listing connection requests above.", v -> { }));
+        page.addView(action("CLIENT SEARCH", "Listening for servers above. Select CONNECT to send a request.", v -> { }));
         page.addView(action("ACTIVITY", "Transfers and completed downloads appear in the activity feed.", v -> { }));
         put(page);
+    }
+
+    public void openTransferPage() {
+        transferPage();
     }
 
     private View profileHeader(boolean server) {
@@ -378,8 +413,9 @@ public class MainActivity extends AppCompatActivity {
         TextView label = subtitle(server ? "SERVER PROFILE" : "CLIENT PROFILE");
         label.setTextColor(server ? Color.rgb(137, 232, 197) : Color.rgb(151, 190, 255));
         String name = p().getString(server ? "server_name" : "client_name", Build.MODEL);
-        String endpoint = localHost().isEmpty() ? "Starting network..." : localHost() + ":" + localPort();
+        String endpoint = localHost().isEmpty() ? "Network starting..." : localHost() + ":" + localPort();
         label.setText((server ? "SERVER" : "CLIENT") + "\n" + name + "\n" + endpoint);
+        if (!server) clientProfileLabel = label;
         label.setPadding(dp(12), 0, 0, 0);
         header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         return header;
@@ -397,7 +433,8 @@ public class MainActivity extends AppCompatActivity {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(0, dp(8), 0, dp(8));
             row.addView(peerAvatar(peer), new LinearLayout.LayoutParams(dp(52), dp(52)));
-            TextView details = subtitle(peer.name + "\n" + peer.host + ":" + peer.address().getPort());
+            TextView details = subtitle(peer.name + "\n" + peer.host + ":" + peer.address().getPort()
+                    + "\nNetwork key: MATCHED");
             details.setPadding(dp(12), 0, dp(8), 0);
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             MacMotionButton connect = new MacMotionButton(this);
@@ -409,6 +446,7 @@ public class MainActivity extends AppCompatActivity {
                 stopSearchPulse();
                 if (searchIndicator != null) searchIndicator.setText("●  Connecting to " + peer.name);
                 node.requestConnection(peer);
+                setConnectionStatus("Request sent to " + peer.name);
                 MacToast.show(this, "Connection request sent to " + peer.name, true);
             });
             row.addView(connect, new LinearLayout.LayoutParams(dp(112), dp(48)));
@@ -433,7 +471,10 @@ public class MainActivity extends AppCompatActivity {
                 try { node.upload(server, file); }
                 catch (Exception error) { runOnUiThread(() -> MacToast.show(this, error.getMessage(), false)); }
             }
-            runOnUiThread(() -> MacToast.show(this, "File requests sent to the server", true));
+            runOnUiThread(() -> {
+                setConnectionStatus("File requests sent to the server");
+                MacToast.show(this, "File requests sent to the server", true);
+            });
         }).start();
     }
 
@@ -451,12 +492,20 @@ public class MainActivity extends AppCompatActivity {
             actions.setGravity(Gravity.END);
             MacMotionButton decline = new MacMotionButton(this);
             decline.setText("DECLINE");
-            decline.setOnClickListener(v -> { node.approveConnection(peer, false); dialog.dismiss(); });
+            decline.setOnClickListener(v -> {
+                node.approveConnection(peer, false);
+                setConnectionStatus("Connection declined for " + peer.name);
+                dialog.dismiss();
+            });
             MacMotionButton accept = new MacMotionButton(this);
             accept.setText("ACCEPT");
             accept.setTextColor(Color.WHITE);
             accept.setBackgroundColor(Color.rgb(22, 145, 105));
-            accept.setOnClickListener(v -> { node.approveConnection(peer, true); dialog.dismiss(); });
+            accept.setOnClickListener(v -> {
+                node.approveConnection(peer, true);
+                setConnectionStatus("Connection accepted for " + peer.name);
+                dialog.dismiss();
+            });
             actions.addView(decline);
             actions.addView(accept);
             body.addView(actions);
@@ -522,7 +571,10 @@ public class MainActivity extends AppCompatActivity {
                 node = made;
                 made.start();
                 runOnUiThread(() -> {
-                    connectionLabel.setText(server ? "●  Hosting securely" : "●  Searching nearby · requests listed below");
+                    setConnectionStatus(server ? "Hosting securely" : "Searching nearby · requests listed below");
+                    if (clientProfileLabel != null && !server) {
+                        clientProfileLabel.setText("CLIENT\n" + name + "\n" + localHost() + ":" + localPort());
+                    }
                     if (server) {
                         if (clientCard != null) clientCard.setVisibility(View.GONE);
                     } else {
@@ -539,7 +591,11 @@ public class MainActivity extends AppCompatActivity {
                     node = null;
                 }
                 releaseRole();
-                MacToast.show(this, "Could not start networking", false);
+                runOnUiThread(() -> {
+                    setConnectionStatus("Networking failed");
+                    if (clientProfileLabel != null) clientProfileLabel.setText("CLIENT\n" + name + "\nNetworking failed");
+                    MacToast.show(this, "Could not start networking", false);
+                });
             }
         }).start();
     }
@@ -552,6 +608,7 @@ public class MainActivity extends AppCompatActivity {
                     runOnUiThread(() -> {
                         discoveredServerPeers.put(peer.id, peer);
                         stopSearchPulse();
+                        setConnectionStatus("Server discovered: " + peer.name);
                         if (searchIndicator != null) {
                             searchIndicator.setText("●  Connection request available from " + peer.name);
                             searchIndicator.setVisibility(View.VISIBLE);
@@ -574,11 +631,15 @@ public class MainActivity extends AppCompatActivity {
             public void onConnectionDecision(Peer peer, boolean accepted) {
                 if (accepted) {
                     runOnUiThread(() -> {
+                        setConnectionStatus("Connection accepted by " + peer.name);
                         MacToast.show(MainActivity.this, "Connected to " + peer.name, true);
                         if (role == SessionCoordinator.Role.CLIENT) node.requestManifest(peer);
                     });
                 } else {
-                    runOnUiThread(() -> MacToast.show(MainActivity.this, peer.name + " declined the connection", false));
+                    runOnUiThread(() -> {
+                        setConnectionStatus(peer.name + " declined the connection");
+                        MacToast.show(MainActivity.this, peer.name + " declined the connection", false);
+                    });
                 }
             }
             public void onUploadOffer(Peer peer, String transfer, FileInfo file) {
@@ -602,7 +663,10 @@ public class MainActivity extends AppCompatActivity {
                 }
                 say("Complete: " + file.getName());
             }
-            public void onFailure(String message) { say(message); }
+            public void onFailure(String message) {
+                setConnectionStatus("Networking failed: " + message);
+                say(message);
+            }
             public void onPeerRemoved(Peer peer, String reason) {
                 say(peer.name + " " + reason);
                 runOnUiThread(() -> {
@@ -650,8 +714,10 @@ public class MainActivity extends AppCompatActivity {
         connect.setTextColor(Color.WHITE);
         connect.setBackgroundColor(Color.rgb(49, 103, 213));
         connect.setOnClickListener(v -> {
-            if (node != null) node.requestManifest(peer);
-            if (connectionLabel != null) connectionLabel.setText("●  Connected to " + peer.name);
+            if (node != null) {
+                node.requestManifest(peer);
+                setConnectionStatus("Request sent to " + peer.name);
+            }
             dialog.dismiss();
         });
         actions.addView(cancel);
@@ -692,12 +758,19 @@ public class MainActivity extends AppCompatActivity {
         return node == null ? Collections.emptyList() : node.connectedPeers();
     }
 
+    public List<Peer> knownPeers() {
+        return node == null ? Collections.emptyList() : node.knownPeers();
+    }
+
     public List<Peer> pendingConnectionRequests() {
         return node == null ? Collections.emptyList() : node.pendingConnections();
     }
 
     public void respondToConnectionRequest(Peer peer, boolean accepted) {
-        if (node != null && role == SessionCoordinator.Role.SERVER) node.approveConnection(peer, accepted);
+        if (node != null && role == SessionCoordinator.Role.SERVER) {
+            node.approveConnection(peer, accepted);
+            setConnectionStatus("Connection " + (accepted ? "accepted for " : "declined for ") + peer.name);
+        }
     }
 
     public String localHost() {
@@ -1018,11 +1091,20 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private void setConnectionStatus(String message) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (connectionLabel != null) connectionLabel.setText("●  " + message);
+            if (activityLog != null) activityLog.setText(message);
+        } else {
+            runOnUiThread(() -> setConnectionStatus(message));
+        }
+    }
+
     private LinearLayout bottomBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER);
         bar.setPadding(dp(12), dp(8), dp(12), dp(8));
-        String[] labels = {"HOME", "FILES", "DEVELOPER", "SETTINGS"};
+        String[] labels = {"HOME", "CONNECTION", "TRANSFER", "DEVELOPER", "SETTINGS"};
         for (String label : labels) {
             MaterialButton button = new MacMotionButton(this);
             button.setText(label);
@@ -1035,8 +1117,10 @@ public class MainActivity extends AppCompatActivity {
                     if (role != null || node != null) {
                         MacToast.show(this, "Stop the active session from Files first", false);
                     } else dashboard();
-                } else if (label.equals("FILES")) {
+                } else if (label.equals("CONNECTION")) {
                     filesPage();
+                } else if (label.equals("TRANSFER")) {
+                    transferPage();
                 } else if (label.equals("DEVELOPER")) {
                     developer();
                 } else {
@@ -1054,10 +1138,20 @@ public class MainActivity extends AppCompatActivity {
     private void updateActivePage(String page) {
         activePage = page;
         for (java.util.Map.Entry<String, MaterialButton> entry : navigationButtons.entrySet()) {
+            boolean active = entry.getKey().equals(page);
+            entry.getValue().setText(active ? entry.getKey() : navigationIcon(entry.getKey()));
             entry.getValue().setBackgroundColor(entry.getKey().equals(page)
                     ? Color.rgb(49, 103, 213) : Color.rgb(29, 38, 61));
             entry.getValue().setTextColor(Color.WHITE);
         }
+    }
+
+    private String navigationIcon(String label) {
+        if ("HOME".equals(label)) return "⌂";
+        if ("CONNECTION".equals(label)) return "⌁";
+        if ("TRANSFER".equals(label)) return "➤";
+        if ("DEVELOPER".equals(label)) return "▣";
+        return "⚙";
     }
 
     private void resetCards() {
