@@ -27,6 +27,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ui.SecondaryActivity"
+            android:exported="false"
+            android:process=":secondary"
+            android:documentLaunchMode="always"
+            android:launchMode="standard" />
         <service
             android:name=".service.ZazzBackgroundService"
             android:exported="false"

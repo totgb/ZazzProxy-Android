@@ -73,11 +73,13 @@ public final class ZazzUdpNode implements Closeable {
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
+    private final Map<String, Long> peerLastSeen = new ConcurrentHashMap<>();
     private final java.util.Set<String> bannedNames = ConcurrentHashMap.newKeySet();
     private final Map<String, Outgoing> sends = new ConcurrentHashMap<>();
     private final Map<String, Outgoing> pendingSends = new ConcurrentHashMap<>();
     private final Map<String, Incoming> receives = new ConcurrentHashMap<>();
     private final Map<String, Peer> approvedPeers = new ConcurrentHashMap<>();
+    private final Map<String, Peer> pendingConnections = new ConcurrentHashMap<>();
     private final File hostedDir, downloadDir;
     private volatile boolean running;
     private DatagramSocket socket;
@@ -95,15 +97,17 @@ public final class ZazzUdpNode implements Closeable {
     public synchronized void start() throws Exception {
         if (running) return;
         socket = new DatagramSocket(null); socket.setReuseAddress(true); socket.setBroadcast(true);
-        socket.bind(new InetSocketAddress(PORT)); running = true;
+        socket.bind(new InetSocketAddress(advertisedServer ? PORT : 0)); running = true;
         receiver.execute(this::receiveLoop);
         scheduler.scheduleAtFixedRate(() -> { try { announce(); } catch (Exception ignored) { } }, 0, 4, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::removeExpiredPeers, 2, 2, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::refreshApprovedManifests, 2, 2, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::pumpOutgoing, 100, 100, TimeUnit.MILLISECONDS);
     }
     public void requestConnection(Peer peer) {
         try {
-            sendRaw(peer.address(), CONNECTION_REQUEST, UUID.randomUUID().toString(), 0,
+            InetSocketAddress server = new InetSocketAddress(peer.address().getAddress(), PORT);
+            sendRaw(server, CONNECTION_REQUEST, UUID.randomUUID().toString(), 0,
                     BinaryProtocol.connectionRequest(nodeId, nodeName));
         } catch (Exception error) {
             postFail("Could not request connection");
@@ -115,6 +119,7 @@ public final class ZazzUdpNode implements Closeable {
         }
     }
     public void approveConnection(Peer peer, boolean accepted) {
+        pendingConnections.remove(peer.id);
         if (accepted) {
             approvedPeers.put(peer.id, peer);
             post(() -> callback.onPeer(peer));
@@ -147,13 +152,43 @@ public final class ZazzUdpNode implements Closeable {
     public List<Peer> connectedPeers() {
         return new ArrayList<>(advertisedServer ? approvedPeers.values() : peers.values());
     }
+    public List<Peer> pendingConnections() {
+        return new ArrayList<>(pendingConnections.values());
+    }
+    public String localHost() {
+        try {
+            java.util.Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                NetworkInterface network = interfaces.nextElement();
+                if (!network.isUp() || network.isLoopback()) continue;
+                java.util.Enumeration<InetAddress> addresses = network.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (!address.isLoopbackAddress() && address instanceof java.net.Inet4Address) {
+                        return address.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Fall back to the socket address below.
+        }
+        return socket == null || socket.getLocalAddress() == null
+                ? "" : socket.getLocalAddress().getHostAddress();
+    }
+    public int localPort() {
+        return socket == null ? 0 : socket.getLocalPort();
+    }
+    public String nodeName() {
+        return nodeName;
+    }
     public void kick(Peer peer) {
         control(peer, KICK);
         peers.remove(peer.id);
+        peerLastSeen.remove(peer.id);
         approvedPeers.remove(peer.id);
         post(() -> callback.onPeerRemoved(peer, "kicked"));
     }
-    public void ban(Peer peer) { bannedNames.add(peer.name); control(peer, BAN); peers.remove(peer.id); approvedPeers.remove(peer.id); post(() -> callback.onPeerRemoved(peer, "banned")); }
+    public void ban(Peer peer) { bannedNames.add(peer.name); control(peer, BAN); peers.remove(peer.id); peerLastSeen.remove(peer.id); approvedPeers.remove(peer.id); post(() -> callback.onPeerRemoved(peer, "banned")); }
     private void control(Peer peer, byte action) {
         try { sendRaw(peer.address(), CONTROL, UUID.randomUUID().toString(), 0, BinaryProtocol.control(action, peer.id, peer.name)); }
         catch (Exception e) { postFail("Could not update " + peer.name); }
@@ -265,6 +300,11 @@ public final class ZazzUdpNode implements Closeable {
         if (advertisedServer && bannedNames.contains(hello.name)) return;
         Peer peer = new Peer(hello.id, hello.name, hello.version, hello.server, from, hello.avatar);
         Peer old = peers.put(peer.id, peer);
+        peerLastSeen.put(peer.id, System.currentTimeMillis());
+        if (advertisedServer && !hello.server) {
+            sendRaw(from, HELLO, UUID.randomUUID().toString(), 0,
+                    BinaryProtocol.hello(nodeId, nodeName, version, true, avatar));
+        }
         if (!advertisedServer || peer.server) {
             if (old == null || !old.host.equals(peer.host)) post(() -> callback.onPeer(peer));
         }
@@ -274,9 +314,13 @@ public final class ZazzUdpNode implements Closeable {
         Peer peer = findPeer(from);
         if (peer == null) {
             peer = new Peer(request.peerId, request.peerName, version, false, from);
-            peers.put(peer.id, peer);
+        } else {
+            peer = new Peer(request.peerId, request.peerName, peer.version, false, from, peer.avatar);
         }
+        peers.put(peer.id, peer);
+        peerLastSeen.put(peer.id, System.currentTimeMillis());
         final Peer requested = peer;
+        pendingConnections.put(requested.id, requested);
         post(() -> callback.onConnectionRequest(requested));
     }
 
@@ -305,6 +349,17 @@ public final class ZazzUdpNode implements Closeable {
         return null;
     }
 
+    private void removeExpiredPeers() {
+        long cutoff = System.currentTimeMillis() - 10_000L;
+        for (Map.Entry<String, Long> entry : peerLastSeen.entrySet()) {
+            if (entry.getValue() >= cutoff) continue;
+            Peer expired = peers.remove(entry.getKey());
+            peerLastSeen.remove(entry.getKey());
+            approvedPeers.remove(entry.getKey());
+            if (expired != null) post(() -> callback.onPeerRemoved(expired, "went offline"));
+        }
+    }
+
     private void refreshApprovedManifests() {
         if (!running || !advertisedServer) return;
         for (Peer peer : approvedPeers.values()) sendManifest(peer.address(), UUID.randomUUID().toString());
@@ -313,6 +368,7 @@ public final class ZazzUdpNode implements Closeable {
         if (advertisedServer) return;
         if (control.action != KICK && control.action != BAN) return;
         Peer removed = peers.remove(control.peerId);
+        peerLastSeen.remove(control.peerId);
         if (removed == null) removed = new Peer(control.peerId, control.peerName, version, true, from);
         final Peer peer = removed;
         post(() -> callback.onPeerRemoved(peer, control.action == BAN ? "banned by server" : "kicked by server"));
@@ -409,8 +465,19 @@ public final class ZazzUdpNode implements Closeable {
         void finish() throws Exception { if (!sha256(part).equalsIgnoreCase(metadata.sha256)) throw new SecurityException("SHA-256 mismatch"); if (!part.renameTo(target)) throw new Exception("Could not save final file"); }
     }
     private synchronized void sendRaw(InetSocketAddress to, byte type, String transfer, int seq, byte[] plain) {
-        try { UUID id=UUID.fromString(transfer); byte[] cipher=encrypt(type,id,seq,plain); ByteBuffer b=ByteBuffer.allocate(4+1+1+16+4+2+cipher.length).putInt(MAGIC).put((byte)VERSION).put(type).putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).putInt(seq).putShort((short)cipher.length).put(cipher); socket.send(new DatagramPacket(b.array(),b.position(),to)); }
-        catch (Exception e) { postFail("Unable to send packet"); }
+        try {
+            if (!running || socket == null || socket.isClosed()) throw new IOException("Network socket is not running");
+            UUID id = UUID.fromString(transfer);
+            byte[] cipher = encrypt(type, id, seq, plain);
+            ByteBuffer packet = ByteBuffer.allocate(4 + 1 + 1 + 16 + 4 + 2 + cipher.length)
+                    .putInt(MAGIC).put((byte) VERSION).put(type)
+                    .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits())
+                    .putInt(seq).putShort((short) cipher.length).put(cipher);
+            socket.send(new DatagramPacket(packet.array(), packet.position(), to));
+        } catch (Exception error) {
+            postFail("Unable to send packet to " + to.getAddress().getHostAddress() + ":"
+                    + to.getPort() + " (" + error.getMessage() + ")");
+        }
     }
     private void sendError(InetSocketAddress to, String transfer, String message) { try { sendRaw(to, ERROR, transfer, 0, BinaryProtocol.error(message)); } catch (Exception e) { postFail("Unable to send error response"); } }
     private byte[] encrypt(byte type, UUID id, int seq, byte[] plain) throws Exception { return Cipher.encrypt(key, type, id, seq, plain); }
@@ -444,5 +511,14 @@ public final class ZazzUdpNode implements Closeable {
         return directory;
     }
     private void post(Runnable runnable) { main.post(runnable); } private void postFail(String message) { post(() -> callback.onFailure(message)); }
-    @Override public synchronized void close() { running=false; if(socket!=null)socket.close();receiver.shutdownNow();scheduler.shutdownNow(); }
+    @Override public synchronized void close() {
+        running = false;
+        peerLastSeen.clear();
+        peers.clear();
+        approvedPeers.clear();
+        pendingConnections.clear();
+        if (socket != null) socket.close();
+        receiver.shutdownNow();
+        scheduler.shutdownNow();
+    }
 }

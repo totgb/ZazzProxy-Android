@@ -2,9 +2,12 @@ package com.totgb.zazzproxy.archive;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 
 import com.totgb.zazzproxy.network.ZazzUdpNode;
 import com.totgb.zazzproxy.model.FileInfo;
+import com.totgb.zazzproxy.settings.ProfileAvatarStore;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.File;
@@ -14,6 +17,7 @@ import java.io.DataOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.FileOutputStream;
 import java.io.EOFException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -23,7 +27,7 @@ import java.util.List;
 public final class ZazzArchive {
     public static final String MANIFEST_EXTENSION = ".zaZzProxy";
     public static final String SETTINGS_EXTENSION = ".zaZzSettings";
-    private static final int FORMAT_VERSION = 1;
+    private static final int FORMAT_VERSION = 2;
     private static final int MAX_ENTRIES = 10_000;
     private static final byte[] MANIFEST_MAGIC = "zaZzP".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SETTINGS_MAGIC = "zaZzS".getBytes(StandardCharsets.US_ASCII);
@@ -31,10 +35,15 @@ public final class ZazzArchive {
     private ZazzArchive() { }
 
     public static void exportManifest(List<FileInfo> files, String nodeName, OutputStream output) throws Exception {
+        exportManifest(files, nodeName, new byte[0], output);
+    }
+
+    public static void exportManifest(List<FileInfo> files, String nodeName, byte[] avatar, OutputStream output) throws Exception {
         if (files.size() > MAX_ENTRIES) throw new IllegalArgumentException("Too many manifest entries");
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(buffer);
-        out.write(MANIFEST_MAGIC); out.writeInt(FORMAT_VERSION); writeText(out, nodeName); out.writeInt(files.size());
+        out.write(MANIFEST_MAGIC); out.writeInt(FORMAT_VERSION); writeText(out, nodeName); writeBytes(out, avatar);
+        out.writeInt(files.size());
         for (FileInfo file : files) {
             writeText(out, file.id); writeText(out, file.name); out.writeLong(file.bytes); writeText(out, file.sha256);
         }
@@ -43,8 +52,13 @@ public final class ZazzArchive {
 
     public static List<FileInfo> importManifest(InputStream input) throws Exception {
         DataInputStream in = new DataInputStream(input);
-        requireMagic(in, MANIFEST_MAGIC); requireVersion(in);
-        readText(in); int count = readCount(in); List<FileInfo> result = new ArrayList<>(count);
+        requireMagic(in, MANIFEST_MAGIC); int version = readVersion(in);
+        readText(in);
+        if (version >= 2) {
+            // Discovery metadata is available to callers that need it; catalog imports retain file compatibility.
+            readBytes(in);
+        }
+        int count = readCount(in); List<FileInfo> result = new ArrayList<>(count);
         for (int i = 0; i < count; i++) result.add(new FileInfo(readText(in), readText(in), in.readLong(), readText(in)));
         return result;
     }
@@ -55,16 +69,21 @@ public final class ZazzArchive {
         DataOutputStream out = new DataOutputStream(buffer);
         out.write(SETTINGS_MAGIC); out.writeInt(FORMAT_VERSION);
         writeText(out, prefs.getString("client_name", "")); writeText(out, prefs.getString("server_name", ""));
-        out.writeBoolean(prefs.getBoolean("dark_mode", false)); out.flush();
+        out.writeBoolean(prefs.getBoolean("dark_mode", false));
+        writeBytes(out, profileAvatar(context, false)); writeBytes(out, profileAvatar(context, true)); out.flush();
         byte[] encoded = buffer.toByteArray(); output.write(encoded, 0, encoded.length);
     }
 
     public static void importSettings(Context context, InputStream input) throws Exception {
         DataInputStream in = new DataInputStream(input);
-        requireMagic(in, SETTINGS_MAGIC); requireVersion(in);
+        requireMagic(in, SETTINGS_MAGIC); int version = readVersion(in);
         context.getSharedPreferences("ZazzPrefs", Context.MODE_PRIVATE).edit()
                 .putString("client_name", readText(in)).putString("server_name", readText(in))
                 .putBoolean("dark_mode", in.readBoolean()).apply();
+        if (version >= 2) {
+            saveAvatar(context, false, readBytes(in));
+            saveAvatar(context, true, readBytes(in));
+        }
     }
 
     public static String sha256(File file) throws Exception { try (InputStream in = new FileInputStream(file)) { return DigestUtils.sha256Hex(in); } }
@@ -81,8 +100,44 @@ public final class ZazzArchive {
         byte[] actual = new byte[expected.length]; in.readFully(actual);
         if (!java.util.Arrays.equals(actual, expected)) throw new IllegalArgumentException("Unsupported Zazz binary format");
     }
+    private static int readVersion(DataInputStream in) throws Exception {
+        int version = in.readInt();
+        if (version < 1 || version > FORMAT_VERSION) throw new IllegalArgumentException("Unsupported Zazz binary format version");
+        return version;
+    }
     private static void requireVersion(DataInputStream in) throws Exception {
-        if (in.readInt() != FORMAT_VERSION) throw new IllegalArgumentException("Unsupported Zazz binary format version");
+        readVersion(in);
+    }
+    public static byte[] profileAvatar(Context context, boolean server) throws Exception {
+        Bitmap source = BitmapFactory.decodeFile(ProfileAvatarStore.avatar(context, server).getAbsolutePath());
+        if (source == null) return new byte[0];
+        Bitmap scaled = Bitmap.createScaledBitmap(source, 96, 96, true);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        scaled.compress(Bitmap.CompressFormat.JPEG, 70, bytes);
+        scaled.recycle();
+        byte[] result = bytes.toByteArray();
+        if (result.length > 65_535) throw new IllegalArgumentException("Profile picture is too large for a Zazz settings file");
+        return result;
+    }
+    private static void saveAvatar(Context context, boolean server, byte[] bytes) throws Exception {
+        if (bytes.length == 0) return;
+        File target = ProfileAvatarStore.avatar(context, server);
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IllegalStateException("Could not create profile storage");
+        try (OutputStream output = new FileOutputStream(target, false)) {
+            output.write(bytes);
+        }
+    }
+    private static void writeBytes(DataOutputStream out, byte[] bytes) throws Exception {
+        out.writeInt(bytes.length);
+        out.write(bytes);
+    }
+    private static byte[] readBytes(DataInputStream in) throws Exception {
+        int length = in.readInt();
+        if (length < 0 || length > 65_535) throw new IllegalArgumentException("Invalid profile picture field");
+        byte[] bytes = new byte[length];
+        in.readFully(bytes);
+        return bytes;
     }
     private static int readCount(DataInputStream in) throws Exception {
         int count = in.readInt(); if (count < 0 || count > MAX_ENTRIES) throw new IllegalArgumentException("Invalid manifest entry count"); return count;

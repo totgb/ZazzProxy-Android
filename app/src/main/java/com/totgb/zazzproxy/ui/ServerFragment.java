@@ -13,15 +13,22 @@ import android.widget.LinearLayout;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.ProgressBar;
+import android.content.res.ColorStateList;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import com.totgb.zazzproxy.settings.ProfileAvatarStore;
 
 public class ServerFragment extends Fragment {
     private TextView fileListContent;
     private TextView removeHint;
     private LinearLayout peerList;
+    private LinearLayout requestList;
+    private LinearLayout transferPanel;
+    private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, TextView> transferLabels = new java.util.LinkedHashMap<>();
     private final java.util.Map<String, com.totgb.zazzproxy.model.Peer> peers = new java.util.LinkedHashMap<>();
     @Nullable
     @Override
@@ -30,7 +37,10 @@ public class ServerFragment extends Fragment {
         android.widget.ScrollView scrollView = new android.widget.ScrollView(getContext());
         scrollView.setFillViewport(true); // Ensures layout takes full height
         scrollView.setVerticalScrollBarEnabled(true);
+        scrollView.setScrollbarFadingEnabled(false);
         scrollView.setSmoothScrollingEnabled(true);
+        scrollView.setNestedScrollingEnabled(true);
+        scrollView.setOverScrollMode(View.OVER_SCROLL_ALWAYS);
 
         // 2. Main content container
         LinearLayout layout = new LinearLayout(getContext());
@@ -40,6 +50,22 @@ public class ServerFragment extends Fragment {
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
         layout.setMinimumHeight(dp(900));
 
+        ImageView profile = new ImageView(requireContext());
+        profile.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        profile.setClipToOutline(true);
+        profile.setBackground(new android.graphics.drawable.GradientDrawable());
+        ((android.graphics.drawable.GradientDrawable) profile.getBackground())
+                .setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        profile.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override public void getOutline(View view, android.graphics.Outline outline) {
+                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+            }
+        });
+        android.graphics.Bitmap profileBitmap = android.graphics.BitmapFactory.decodeFile(
+                ProfileAvatarStore.avatar(requireContext(), true).getAbsolutePath());
+        profile.setImageBitmap(profileBitmap);
+        layout.addView(profile, new LinearLayout.LayoutParams(dp(64), dp(64)));
+
         TextView title = new TextView(getContext());
         title.setText("Server Mode Active");
         title.setTextSize(26);
@@ -47,7 +73,12 @@ public class ServerFragment extends Fragment {
         layout.addView(title);
 
         TextView subtitle = new TextView(getContext());
-        subtitle.setText("Select files to make them available to peers.");
+        String endpoint = getActivity() instanceof MainActivity
+                ? ((MainActivity) getActivity()).localHost() + ":" + ((MainActivity) getActivity()).localPort()
+                : "";
+        subtitle.setText("Server: " + (getActivity() instanceof MainActivity
+                ? ((MainActivity) getActivity()).nodeName() : "ZazzProxy")
+                + "\n" + endpoint + "\nSelect files to make them available to peers.");
         subtitle.setPadding(0, 16, 0, 48);
         layout.addView(subtitle);
 
@@ -63,7 +94,7 @@ public class ServerFragment extends Fragment {
         addSpaced(layout, stopServerButton, 52);
 
         TextView peersTitle = new TextView(getContext());
-        peersTitle.setText("Connected clients");
+        peersTitle.setText("Clients nearby");
         peersTitle.setTextSize(19);
         peersTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         peersTitle.setPadding(0, dp(28), 0, dp(8));
@@ -71,6 +102,32 @@ public class ServerFragment extends Fragment {
         peerList = new LinearLayout(getContext());
         peerList.setOrientation(LinearLayout.VERTICAL);
         layout.addView(peerList);
+        requestList = new LinearLayout(getContext());
+        requestList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout requestsHeading = new LinearLayout(getContext());
+        requestsHeading.setGravity(Gravity.CENTER_VERTICAL);
+        TextView requestsTitle = new TextView(getContext());
+        requestsTitle.setText("Connection requests");
+        requestsTitle.setTextColor(android.graphics.Color.rgb(132, 169, 224));
+        requestsTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        requestsTitle.setPadding(0, dp(20), 0, dp(8));
+        requestsHeading.addView(requestsTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        MacMotionButton refreshRequests = new MacMotionButton(requireContext());
+        refreshRequests.setText("REFRESH");
+        refreshRequests.setTextColor(android.graphics.Color.WHITE);
+        refreshRequests.setBackgroundColor(android.graphics.Color.rgb(49, 103, 213));
+        refreshRequests.setOnClickListener(v -> refreshRequests());
+        requestsHeading.addView(refreshRequests, new LinearLayout.LayoutParams(dp(100), dp(44)));
+        layout.addView(requestsHeading);
+        layout.addView(requestList);
+        transferPanel = new LinearLayout(getContext());
+        transferPanel.setOrientation(LinearLayout.VERTICAL);
+        TextView transferTitle = new TextView(getContext());
+        transferTitle.setText("ACTIVE TRANSFERS");
+        transferTitle.setTextColor(android.graphics.Color.rgb(132, 169, 224));
+        transferTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        transferPanel.addView(transferTitle);
+        layout.addView(transferPanel);
 
         MacMotionButton pickFilesBtn = new MacMotionButton(requireContext());
         pickFilesBtn.setText("Select Files to Host");
@@ -110,7 +167,18 @@ public class ServerFragment extends Fragment {
             }
         }
         refreshPeers();
+        refreshRequests();
         refreshHostedFiles();
+        scrollView.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            int width = scrollView.getWidth();
+            if (width == 0) return;
+            boolean compact = width / getResources().getDisplayMetrics().density < 420;
+            int horizontal = dp(compact ? 14 : 24);
+            layout.setPadding(horizontal, dp(compact ? 10 : 18),
+                    horizontal, dp(compact ? 14 : 24));
+            layout.setMinimumHeight(dp(Math.max(compact ? 760 : 1000,
+                    Math.round(scrollView.getHeight() / getResources().getDisplayMetrics().density) + 180)));
+        });
         return scrollView; // Return the scrollview, not the layout!
     }
 
@@ -121,9 +189,81 @@ public class ServerFragment extends Fragment {
         }
     }
 
+    public void onConnectionRequest(com.totgb.zazzproxy.model.Peer peer) {
+            refreshRequests();
+    }
+
+        private void refreshRequests() {
+            if (requestList == null || !(getActivity() instanceof MainActivity)) return;
+            requestList.removeAllViews();
+            java.util.List<com.totgb.zazzproxy.model.Peer> requests =
+                    ((MainActivity) getActivity()).pendingConnectionRequests();
+            if (requests.isEmpty()) {
+                TextView empty = new TextView(getContext());
+                empty.setText("No pending client requests.");
+                requestList.addView(empty);
+                return;
+            }
+            for (com.totgb.zazzproxy.model.Peer peer : requests) {
+                LinearLayout row = new LinearLayout(getContext());
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                TextView name = new TextView(getContext());
+                name.setText(peer.name + "\n" + peer.host + ":" + peer.address().getPort());
+                name.setTextColor(android.graphics.Color.WHITE);
+                row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+                MacMotionButton decline = new MacMotionButton(requireContext());
+                decline.setText("DECLINE");
+                decline.setOnClickListener(v -> {
+                    ((MainActivity) getActivity()).respondToConnectionRequest(peer, false);
+                    refreshRequests();
+                });
+                row.addView(decline, new LinearLayout.LayoutParams(dp(92), dp(44)));
+                MacMotionButton accept = new MacMotionButton(requireContext());
+                accept.setText("ACCEPT");
+                accept.setTextColor(android.graphics.Color.WHITE);
+                accept.setBackgroundColor(android.graphics.Color.rgb(22, 145, 105));
+                accept.setOnClickListener(v -> {
+                    ((MainActivity) getActivity()).respondToConnectionRequest(peer, true);
+                    refreshRequests();
+                });
+                row.addView(accept, new LinearLayout.LayoutParams(dp(92), dp(44)));
+                requestList.addView(row);
+            }
+    }
+
     public void onClientRemoved(com.totgb.zazzproxy.model.Peer peer) {
         peers.remove(peer.id);
         refreshPeers();
+    }
+
+    public void onTransfer(String name, long current, long total, boolean upload) {
+        if (transferPanel == null) return;
+        ProgressBar bar = transferBars.get(name);
+        TextView label = transferLabels.get(name);
+        if (bar == null) {
+            label = new TextView(requireContext());
+            label.setTextColor(android.graphics.Color.WHITE);
+            bar = new ProgressBar(requireContext(), null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(1000);
+            bar.setProgressTintList(ColorStateList.valueOf(android.graphics.Color.rgb(
+                    70 + new java.util.Random().nextInt(130),
+                    70 + new java.util.Random().nextInt(130),
+                    70 + new java.util.Random().nextInt(130))));
+            transferLabels.put(name, label);
+            transferBars.put(name, bar);
+            transferPanel.addView(label);
+            transferPanel.addView(bar, new LinearLayout.LayoutParams(-1, dp(10)));
+        }
+        int percent = total <= 0 ? 0 : (int) Math.max(0, Math.min(1000, (current * 1000L) / total));
+        label.setText((upload ? "Uploading  " : "Downloading  ") + name + "  " + (percent / 10) + "%");
+        bar.setProgress(percent);
+    }
+
+    public void finishTransfer(String name) {
+        ProgressBar bar = transferBars.remove(name);
+        TextView label = transferLabels.remove(name);
+        if (label != null && transferPanel != null) transferPanel.removeView(label);
+        if (bar != null && transferPanel != null) transferPanel.removeView(bar);
     }
 
     private void refreshPeers() {
@@ -157,7 +297,17 @@ public class ServerFragment extends Fragment {
             });
             row.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
             TextView name = new TextView(getContext());
-            name.setText("●  " + peer.name + "\n    " + peer.host);
+            boolean awaiting = false;
+            if (getActivity() instanceof MainActivity) {
+                for (com.totgb.zazzproxy.model.Peer request : ((MainActivity) getActivity()).pendingConnectionRequests()) {
+                    if (request.id.equals(peer.id)) {
+                        awaiting = true;
+                        break;
+                    }
+                }
+            }
+            name.setText("●  " + peer.name + "\n    " + peer.host + ":" + peer.address().getPort()
+                    + "\n    " + (awaiting ? "Awaiting request response" : "Available · awaiting client request"));
             name.setTextSize(16);
             row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             MacMotionButton kick = new MacMotionButton(requireContext());
@@ -263,12 +413,59 @@ public class ServerFragment extends Fragment {
         LinearLayout choices = new LinearLayout(requireContext());
         choices.setOrientation(LinearLayout.VERTICAL);
         java.util.ArrayList<android.widget.CheckBox> checks = new java.util.ArrayList<>();
+        android.os.Handler rangeHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        int[] rangeAnchor = {-1};
+        int[] rangeIndex = {-1};
+        boolean[] rangeActive = {false};
         for (java.io.File file : hosted) {
             android.widget.CheckBox check = new android.widget.CheckBox(requireContext());
             check.setText(file.getName());
             check.setTextColor(android.graphics.Color.WHITE);
             checks.add(check);
             choices.addView(check);
+            final int index = checks.size() - 1;
+            check.setOnTouchListener((view, event) -> {
+                if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    rangeHandler.postDelayed(() -> {
+                        rangeActive[0] = true;
+                        rangeAnchor[0] = index;
+                        rangeIndex[0] = index;
+                        check.setChecked(true);
+                    }, android.view.ViewConfiguration.getLongPressTimeout());
+                } else if (event.getAction() == android.view.MotionEvent.ACTION_MOVE
+                        && rangeActive[0]) {
+                    float absoluteY = check.getTop() + event.getY();
+                    int current = rangeIndex[0];
+                    for (int i = 0; i < checks.size(); i++) {
+                        android.view.View candidate = choices.getChildAt(i);
+                        if (absoluteY >= candidate.getTop()
+                                && absoluteY <= candidate.getBottom()) {
+                            current = i;
+                            break;
+                        }
+                    }
+                    if (current != rangeIndex[0]) {
+                        if (current > rangeIndex[0]) {
+                            for (int i = rangeIndex[0] + 1; i <= current; i++) {
+                                checks.get(i).setChecked(true);
+                            }
+                        } else {
+                            for (int i = current + 1; i <= rangeIndex[0]; i++) {
+                                checks.get(i).setChecked(false);
+                            }
+                        }
+                        rangeIndex[0] = current;
+                    }
+                    return true;
+                } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
+                        || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                    rangeHandler.removeCallbacksAndMessages(null);
+                    boolean consume = rangeActive[0];
+                    rangeActive[0] = false;
+                    if (consume) return true;
+                }
+                return false;
+            });
         }
         choicesScroll.addView(choices, new android.widget.ScrollView.LayoutParams(-1, -2));
         body.addView(choicesScroll, new LinearLayout.LayoutParams(-1, dp(300)));

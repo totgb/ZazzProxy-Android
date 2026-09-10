@@ -11,6 +11,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.*;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -36,7 +38,7 @@ import java.util.Set;
 import java.io.ByteArrayInputStream;
 
 /** Purpose-built LAN sharing dashboard. All layout is created in Java. */
-public final class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity {
     private static final int EXPORT_CATALOG = 41, IMPORT_CATALOG = 42, EXPORT_SETTINGS = 43, IMPORT_SETTINGS = 44,
             PICK_CLIENT_AVATAR = 45, PICK_SERVER_AVATAR = 46, PICK_CLIENT_FILES = 47;
     private FrameLayout content;
@@ -56,14 +58,21 @@ public final class MainActivity extends AppCompatActivity {
     private final java.util.Map<String, Peer> discoveredServerPeers = new java.util.LinkedHashMap<>();
     private final java.util.List<File> pendingClientFiles = new java.util.ArrayList<>();
     private boolean transferredInSession;
+    private LinearLayout transferPanel;
+    private final java.util.Map<String, ProgressBar> transferBars = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, TextView> transferLabels = new java.util.LinkedHashMap<>();
     private final android.os.Handler searchHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Set<String> promptedServers = new HashSet<>();
     private boolean searchPulse;
+    private boolean navigationBusy;
     private WifiManager.MulticastLock multicastLock;
     private final java.util.Map<String, MaterialButton> navigationButtons = new java.util.LinkedHashMap<>();
     private String activePage = "HOME";
     private static final int STORAGE_PERMISSION_REQUEST = 901;
     private LinearLayout bottomNavigation;
+    private View responsiveRoot;
+    private int lastWidth;
+    private int lastHeight;
 
     @Override public void onCreate(Bundle state) {
         applyTheme(p().getString("theme", "system"));
@@ -84,13 +93,70 @@ public final class MainActivity extends AppCompatActivity {
         shell.addView(bottomNavigation, new LinearLayout.LayoutParams(-1, dp(78)));
         FrameLayout root = new FrameLayout(this);
         root.addView(shell, new FrameLayout.LayoutParams(-1, -1));
+        responsiveRoot = root;
         configureSystemNavigation(root);
         BlockChaseView chase = new BlockChaseView(this);
         chase.setClickable(false);
         root.addView(chase, new FrameLayout.LayoutParams(-1, -1));
         scheduleChase(chase);
         setContentView(root);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override public void onGlobalLayout() {
+                if (responsiveRoot == null) return;
+                int width = responsiveRoot.getWidth();
+                int height = responsiveRoot.getHeight();
+                if (width == 0 || height == 0 || (width == lastWidth && height == lastHeight)) return;
+                lastWidth = width;
+                lastHeight = height;
+                applyResponsiveLayout(width, height);
+            }
+        });
         dashboard();
+    }
+
+    private void applyResponsiveLayout(int width, int height) {
+        if (bottomNavigation == null) return;
+        float density = getResources().getDisplayMetrics().density;
+        int widthDp = Math.round(width / density);
+        int heightDp = Math.round(height / density);
+        boolean compact = widthDp < 420 || heightDp < 600;
+
+        bottomNavigation.setPadding(dp(compact ? 6 : 12), dp(6),
+                dp(compact ? 6 : 12), bottomNavigation.getPaddingBottom());
+        LinearLayout.LayoutParams navigationParams =
+                (LinearLayout.LayoutParams) bottomNavigation.getLayoutParams();
+        int inset = Math.max(0, bottomNavigation.getPaddingBottom() - dp(8));
+        int desiredHeight = dp(compact ? 64 : 78) + inset;
+        if (navigationParams.height != desiredHeight) {
+            navigationParams.height = desiredHeight;
+            bottomNavigation.setLayoutParams(navigationParams);
+        }
+        for (MaterialButton button : navigationButtons.values()) {
+            button.setTextSize(compact ? 9 : 11);
+            button.setPadding(dp(compact ? 2 : 6), 0, dp(compact ? 2 : 6), 0);
+        }
+        if (content != null && content.getChildCount() > 0) {
+            View page = content.getChildAt(0);
+            View scroll = page instanceof ScrollView ? page : null;
+            if (scroll == null && page instanceof ViewGroup && ((ViewGroup) page).getChildCount() > 0) {
+                scroll = ((ViewGroup) page).getChildAt(0);
+            }
+            if (scroll instanceof ScrollView && ((ViewGroup) scroll).getChildCount() > 0) {
+                View body = ((ViewGroup) scroll).getChildAt(0);
+                if (body instanceof ViewGroup) {
+                    int horizontalPadding = dp(compact ? 14 : 24);
+                    body.setPadding(horizontalPadding, dp(compact ? 8 : 12),
+                            horizontalPadding, dp(compact ? 12 : 18));
+                    body.setMinimumHeight(dp(Math.max(compact ? 760 : 900, heightDp + 180)));
+                }
+            }
+        }
+        if (responsiveRoot != null) responsiveRoot.requestLayout();
+        if (content != null) {
+            content.setClipToPadding(false);
+            content.setPadding(0, 0, 0, dp(compact ? 8 : 12));
+            content.requestLayout();
+        }
     }
 
     private void configureSystemNavigation(View root) {
@@ -150,6 +216,11 @@ public final class MainActivity extends AppCompatActivity {
         serverCard = modeCard("SERVER", "Share from this device", "Choose files and make them available to trusted peers.", "START HOSTING", true);
         page.addView(clientCard);
         page.addView(serverCard);
+        if (p().getBoolean("developer_mode", false)) {
+            page.addView(action("OPEN SECOND WINDOW",
+                    "Launch another ZazzProxy process like a desktop app window.",
+                    v -> launchSecondaryWindow()));
+        }
         clientStopButton = new MacMotionButton(this);
         clientStopButton.setText("STOP CURRENT SESSION");
         clientStopButton.setTextColor(Color.WHITE);
@@ -159,7 +230,7 @@ public final class MainActivity extends AppCompatActivity {
             stopSession(true);
             dashboard();
         });
-        searchIndicator = subtitle("◌  Client search is idle");
+        searchIndicator = subtitle("◌  Client search ready · connection requests appear here");
         searchIndicator.setTextColor(Color.rgb(151, 190, 255));
         page.addView(searchIndicator);
         page.addView(space(18));
@@ -229,7 +300,7 @@ public final class MainActivity extends AppCompatActivity {
         if (resetButton != null) resetButton.setVisibility(View.GONE);
         connect(true);
         getSupportFragmentManager().beginTransaction()
-                .replace(content.getId(), new ServerFragment()).commitNow();
+                .replace(content.getId(), new ServerFragment()).commit();
     }
 
     private void filesPage() {
@@ -240,10 +311,11 @@ public final class MainActivity extends AppCompatActivity {
         updateActivePage("FILES");
         if (role == SessionCoordinator.Role.SERVER) {
             getSupportFragmentManager().beginTransaction()
-                    .replace(content.getId(), new ServerFragment()).commitNow();
+                    .replace(content.getId(), new ServerFragment()).commit();
             return;
         }
         LinearLayout page = page();
+        page.addView(profileHeader(false));
         page.addView(eyebrow("FILES"));
         page.addView(title("Your file room."));
         page.addView(subtitle("Discover a server, request access, then choose which files to download."));
@@ -252,8 +324,7 @@ public final class MainActivity extends AppCompatActivity {
         clientStopButton.setTextColor(Color.WHITE);
         clientStopButton.setBackgroundColor(Color.rgb(150, 61, 78));
         clientStopButton.setOnClickListener(v -> {
-            stopSession(true);
-            dashboard();
+            returnHome();
         });
         page.addView(clientStopButton, new LinearLayout.LayoutParams(-1, dp(52)));
         MacMotionButton chooseFiles = new MacMotionButton(this);
@@ -269,7 +340,7 @@ public final class MainActivity extends AppCompatActivity {
         page.addView(clientSelectedFiles);
         page.addView(action("SEND SELECTED FILES", "Ask the server to accept these files.",
                 v -> sendSelectedFiles()));
-        page.addView(sectionLabel("SERVERS NEARBY"));
+        page.addView(sectionLabel("CONNECTION REQUESTS"));
         discoveredServers = new LinearLayout(this);
         discoveredServers.setOrientation(LinearLayout.VERTICAL);
         page.addView(discoveredServers);
@@ -277,17 +348,48 @@ public final class MainActivity extends AppCompatActivity {
         clientFiles = new LinearLayout(this);
         clientFiles.setOrientation(LinearLayout.VERTICAL);
         page.addView(clientFiles);
+        transferPanel = transferPanel();
+        page.addView(transferPanel);
         refreshDiscoveredServers();
-        page.addView(action("SEARCHING NEARBY", "Listening for servers on your local network.", v -> { }));
+        page.addView(action("CLIENT SEARCH", "Listening for servers and listing connection requests above.", v -> { }));
         page.addView(action("ACTIVITY", "Transfers and completed downloads appear in the activity feed.", v -> { }));
         put(page);
+    }
+
+    private View profileHeader(boolean server) {
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, dp(4), 0, dp(12));
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setClipToOutline(true);
+        image.setBackground(new android.graphics.drawable.GradientDrawable());
+        ((android.graphics.drawable.GradientDrawable) image.getBackground())
+                .setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        image.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override public void getOutline(View view, android.graphics.Outline outline) {
+                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+            }
+        });
+        android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeFile(
+                ProfileAvatarStore.avatar(this, server).getAbsolutePath());
+        image.setImageBitmap(bitmap);
+        header.addView(image, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        TextView label = subtitle(server ? "SERVER PROFILE" : "CLIENT PROFILE");
+        label.setTextColor(server ? Color.rgb(137, 232, 197) : Color.rgb(151, 190, 255));
+        String name = p().getString(server ? "server_name" : "client_name", Build.MODEL);
+        String endpoint = localHost().isEmpty() ? "Starting network..." : localHost() + ":" + localPort();
+        label.setText((server ? "SERVER" : "CLIENT") + "\n" + name + "\n" + endpoint);
+        label.setPadding(dp(12), 0, 0, 0);
+        header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+        return header;
     }
 
     private void refreshDiscoveredServers() {
         if (discoveredServers == null) return;
         discoveredServers.removeAllViews();
         if (discoveredServerPeers.isEmpty()) {
-            discoveredServers.addView(subtitle("No servers found yet. Keep this page open while a server is hosting."));
+            discoveredServers.addView(subtitle("No connection requests yet. Keep this page open while servers are hosting."));
             return;
         }
         for (Peer peer : discoveredServerPeers.values()) {
@@ -295,7 +397,7 @@ public final class MainActivity extends AppCompatActivity {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(0, dp(8), 0, dp(8));
             row.addView(peerAvatar(peer), new LinearLayout.LayoutParams(dp(52), dp(52)));
-            TextView details = subtitle(peer.name + "\n" + peer.host);
+            TextView details = subtitle(peer.name + "\n" + peer.host + ":" + peer.address().getPort());
             details.setPadding(dp(12), 0, dp(8), 0);
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             MacMotionButton connect = new MacMotionButton(this);
@@ -420,7 +522,7 @@ public final class MainActivity extends AppCompatActivity {
                 node = made;
                 made.start();
                 runOnUiThread(() -> {
-                    connectionLabel.setText(server ? "●  Hosting securely" : "●  Searching nearby");
+                    connectionLabel.setText(server ? "●  Hosting securely" : "●  Searching nearby · requests listed below");
                     if (server) {
                         if (clientCard != null) clientCard.setVisibility(View.GONE);
                     } else {
@@ -449,6 +551,11 @@ public final class MainActivity extends AppCompatActivity {
                 if (role == SessionCoordinator.Role.CLIENT && peer.server) {
                     runOnUiThread(() -> {
                         discoveredServerPeers.put(peer.id, peer);
+                        stopSearchPulse();
+                        if (searchIndicator != null) {
+                            searchIndicator.setText("●  Connection request available from " + peer.name);
+                            searchIndicator.setVisibility(View.VISIBLE);
+                        }
                         refreshDiscoveredServers();
                     });
                 } else if (role == SessionCoordinator.Role.SERVER && !peer.server) {
@@ -459,7 +566,10 @@ public final class MainActivity extends AppCompatActivity {
                 }
             }
             public void onConnectionRequest(Peer peer) {
-                if (role == SessionCoordinator.Role.SERVER) runOnUiThread(() -> confirmClient(peer));
+                if (role == SessionCoordinator.Role.SERVER) runOnUiThread(() -> {
+                    androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
+                    if (fragment instanceof ServerFragment) ((ServerFragment) fragment).onConnectionRequest(peer);
+                });
             }
             public void onConnectionDecision(Peer peer, boolean accepted) {
                 if (accepted) {
@@ -475,9 +585,21 @@ public final class MainActivity extends AppCompatActivity {
                 if (role == SessionCoordinator.Role.SERVER) runOnUiThread(() -> confirmUpload(peer, transfer, file));
             }
             public void onManifest(Peer peer, List<FileInfo> files) { showFiles(peer, files); }
-            public void onTransfer(String name, long current, long total, boolean upload) { say((upload ? "Uploading " : "Downloading ") + name); }
+            public void onTransfer(String name, long current, long total, boolean upload) {
+                showTransferProgress(name, current, total, upload);
+                androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
+                if (fragment instanceof ServerFragment) {
+                    ((ServerFragment) fragment).onTransfer(name, current, total, upload);
+                }
+                say((upload ? "Uploading " : "Downloading ") + name);
+            }
             public void onComplete(File file) {
                 transferredInSession = true;
+                runOnUiThread(() -> finishTransfer(file.getName()));
+                androidx.fragment.app.Fragment fragment = getSupportFragmentManager().findFragmentById(content.getId());
+                if (fragment instanceof ServerFragment) {
+                    ((ServerFragment) fragment).finishTransfer(file.getName());
+                }
                 say("Complete: " + file.getName());
             }
             public void onFailure(String message) { say(message); }
@@ -570,6 +692,26 @@ public final class MainActivity extends AppCompatActivity {
         return node == null ? Collections.emptyList() : node.connectedPeers();
     }
 
+    public List<Peer> pendingConnectionRequests() {
+        return node == null ? Collections.emptyList() : node.pendingConnections();
+    }
+
+    public void respondToConnectionRequest(Peer peer, boolean accepted) {
+        if (node != null && role == SessionCoordinator.Role.SERVER) node.approveConnection(peer, accepted);
+    }
+
+    public String localHost() {
+        return node == null ? "" : node.localHost();
+    }
+
+    public int localPort() {
+        return node == null ? 0 : node.localPort();
+    }
+
+    public String nodeName() {
+        return node == null ? Build.MODEL : node.nodeName();
+    }
+
     private void showFiles(Peer peer, List<FileInfo> files) {
         connectedServer = peer;
         runOnUiThread(() -> {
@@ -609,9 +751,9 @@ public final class MainActivity extends AppCompatActivity {
         EditText clientName = field("Client name", p().getString("client_name", Build.MODEL), false);
         EditText serverName = field("Server name", p().getString("server_name", Build.MODEL), false);
         EditText networkKey = field("Network key", p().getString("network_key", ""), true);
-        page.addView(clientName);
-        page.addView(serverName);
-        page.addView(networkKey);
+        page.addView(labeledField("CLIENT NAME", clientName));
+        page.addView(labeledField("SERVER NAME", serverName));
+        page.addView(labeledField("NETWORK KEY", networkKey));
         MacMotionButton saveSettings = new MacMotionButton(this);
         saveSettings.setText("SAVE SETTINGS");
         saveSettings.setTextColor(Color.WHITE);
@@ -630,6 +772,13 @@ public final class MainActivity extends AppCompatActivity {
             MacToast.show(this, "Settings saved", true);
         });
         page.addView(saveSettings, new LinearLayout.LayoutParams(-1, dp(52)));
+        MacMotionButton developerMode = new MacMotionButton(this);
+        developerMode.setText(p().getBoolean("developer_mode", false)
+                ? "DEVELOPER MODE: ON" : "ENABLE DEVELOPER MODE");
+        developerMode.setTextColor(Color.WHITE);
+        developerMode.setBackgroundColor(Color.rgb(118, 78, 180));
+        developerMode.setOnClickListener(v -> confirmDeveloperMode(developerMode));
+        page.addView(developerMode, new LinearLayout.LayoutParams(-1, dp(52)));
         page.addView(action("Client profile picture", "Used when this device searches and connects",
                 v -> pickAvatar(false)));
         page.addView(action("Server profile picture", "Used when this device hosts files",
@@ -641,6 +790,56 @@ public final class MainActivity extends AppCompatActivity {
         page.addView(action("Quit ZazzProxy", "Stop networking and leave the application",
                 v -> quitApplication()));
         put(page);
+    }
+
+    private void confirmDeveloperMode(MacMotionButton button) {
+        boolean enabling = !p().getBoolean("developer_mode", false);
+        android.app.Dialog dialog = new android.app.Dialog(this);
+        MaterialCardView card = new MaterialCardView(this);
+        card.setRadius(dp(24));
+        card.setCardBackgroundColor(Color.rgb(29, 38, 61));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(22), dp(20), dp(22), dp(20));
+        body.addView(title(enabling ? "Enable developer mode?" : "Disable developer mode?"));
+        body.addView(subtitle(enabling
+                ? "This adds a button on Home that launches a separate ZazzProxy process and window."
+                : "The second-window launcher will be removed from Home."));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        MacMotionButton cancel = new MacMotionButton(this);
+        cancel.setText("CANCEL");
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        MacMotionButton confirm = new MacMotionButton(this);
+        confirm.setText(enabling ? "ENABLE" : "DISABLE");
+        confirm.setTextColor(Color.WHITE);
+        confirm.setBackgroundColor(enabling ? Color.rgb(118, 78, 180) : Color.rgb(150, 61, 78));
+        confirm.setOnClickListener(v -> {
+            p().edit().putBoolean("developer_mode", enabling).apply();
+            button.setText(enabling ? "DEVELOPER MODE: ON" : "ENABLE DEVELOPER MODE");
+            dialog.dismiss();
+            MacToast.show(this, enabling ? "Developer mode enabled" : "Developer mode disabled", true);
+        });
+        actions.addView(cancel);
+        actions.addView(confirm);
+        body.addView(actions);
+        card.addView(body);
+        dialog.setContentView(card);
+        android.view.Window window = dialog.getWindow();
+        if (window != null) window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        dialog.show();
+    }
+
+    private void launchSecondaryWindow() {
+        if (!p().getBoolean("developer_mode", false)) {
+            MacToast.show(this, "Enable developer mode in Settings first", false);
+            return;
+        }
+        Intent intent = new Intent(this, SecondaryActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+                | Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        startActivity(intent);
     }
 
     private void quitApplication() {
@@ -683,11 +882,26 @@ public final class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    public void stopAllNetworking() { stopSession(true); }
+    public void stopAllNetworking() { confirmStopIfNeeded(() -> stopSession(true)); }
 
     public void returnHome() {
-        stopSession(true);
-        dashboard();
+        confirmStopIfNeeded(() -> {
+            stopSession(true);
+            dashboard();
+        });
+    }
+
+    private void confirmStopIfNeeded(Runnable stopAction) {
+        if (transferBars.isEmpty()) {
+            stopAction.run();
+            return;
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Transfer in progress")
+                .setMessage("Stopping now will interrupt active file transfers. End the current session?")
+                .setNegativeButton("KEEP TRANSFERRING", null)
+                .setPositiveButton("END SESSION", (dialog, which) -> stopAction.run())
+                .show();
     }
 
     private void stopSession(boolean feedback) {
@@ -703,6 +917,9 @@ public final class MainActivity extends AppCompatActivity {
         connectedServer = null;
         lastManifestSignature = "";
         transferredInSession = false;
+        transferBars.clear();
+        transferLabels.clear();
+        if (transferPanel != null) transferPanel.removeAllViews();
         if (clientStopButton != null) clientStopButton.setVisibility(View.GONE);
         if (clientCard != null) clientCard.setVisibility(View.VISIBLE);
         if (serverCard != null) serverCard.setVisibility(View.VISIBLE);
@@ -747,9 +964,45 @@ public final class MainActivity extends AppCompatActivity {
         if (searchIndicator != null) {
             searchHandler.removeCallbacksAndMessages(null);
             searchIndicator.setTranslationX(0);
-            searchIndicator.setText("◌  Client search is idle");
+            searchIndicator.setText("◌  Client search ready · connection requests appear here");
             searchIndicator.setVisibility(View.VISIBLE);
         }
+    }
+
+    public void showTransferProgress(String name, long current, long total, boolean upload) {
+            ProgressBar bar = transferBars.get(name);
+            TextView label = transferLabels.get(name);
+            if (bar == null) {
+                label = subtitle((upload ? "Uploading  " : "Downloading  ") + name);
+                bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                bar.setMax(1000);
+                java.util.Random random = new java.util.Random();
+                bar.setProgressTintList(android.content.res.ColorStateList.valueOf(
+                        Color.rgb(70 + random.nextInt(130), 70 + random.nextInt(130), 70 + random.nextInt(130))));
+                transferLabels.put(name, label);
+                transferBars.put(name, bar);
+                if (transferPanel != null) {
+                    transferPanel.addView(label);
+                    transferPanel.addView(bar, new LinearLayout.LayoutParams(-1, dp(10)));
+                }
+            }
+            int percent = total <= 0 ? 0 : (int) Math.max(0, Math.min(1000, (current * 1000L) / total));
+            bar.setProgress(percent);
+            label.setText((upload ? "Uploading  " : "Downloading  ") + name + "  " + (percent / 10) + "%");
+        }
+
+    private void finishTransfer(String name) {
+            ProgressBar bar = transferBars.remove(name);
+            TextView label = transferLabels.remove(name);
+            if (label != null && transferPanel != null) transferPanel.removeView(label);
+            if (bar != null && transferPanel != null) transferPanel.removeView(bar);
+        }
+
+    private LinearLayout transferPanel() {
+            LinearLayout panel = new LinearLayout(this);
+            panel.setOrientation(LinearLayout.VERTICAL);
+            panel.addView(sectionLabel("ACTIVE TRANSFERS"));
+            return panel;
     }
 
     private void pickAvatar(boolean server) {
@@ -769,22 +1022,25 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER);
         bar.setPadding(dp(12), dp(8), dp(12), dp(8));
-        String[] labels = {"HOME", "FILES", "SETTINGS", "DEVELOPER"};
+        String[] labels = {"HOME", "FILES", "DEVELOPER", "SETTINGS"};
         for (String label : labels) {
             MaterialButton button = new MacMotionButton(this);
             button.setText(label);
             button.setTextSize(11);
             button.setOnClickListener(v -> {
+                if (navigationBusy) return;
+                navigationBusy = true;
+                v.postDelayed(() -> navigationBusy = false, 350);
                 if (label.equals("HOME")) {
                     if (role != null || node != null) {
                         MacToast.show(this, "Stop the active session from Files first", false);
                     } else dashboard();
                 } else if (label.equals("FILES")) {
                     filesPage();
-                } else if (label.equals("SETTINGS")) {
-                    settings();
-                } else {
+                } else if (label.equals("DEVELOPER")) {
                     developer();
+                } else {
+                    settings();
                 }
             });
             navigationButtons.put(label, button);
@@ -861,10 +1117,21 @@ public final class MainActivity extends AppCompatActivity {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(true);
+        scroll.setScrollbarFadingEnabled(false);
+        scroll.setSmoothScrollingEnabled(true);
+        scroll.setNestedScrollingEnabled(true);
+        scroll.setOverScrollMode(View.OVER_SCROLL_ALWAYS);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(24), dp(12), dp(24), dp(18));
-        content.setMinimumHeight(dp(720));
+        content.setFocusable(true);
+        content.setFocusableInTouchMode(true);
+        int widthDp = Math.round(getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density);
+        boolean compact = widthDp < 420;
+        int horizontalPadding = dp(compact ? 14 : 24);
+        content.setPadding(horizontalPadding, dp(compact ? 8 : 12),
+                horizontalPadding, dp(compact ? 12 : 18));
+        content.setMinimumHeight(dp(compact ? 760 : 900));
         scroll.addView(content);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -899,6 +1166,15 @@ public final class MainActivity extends AppCompatActivity {
     }
     private TextView titleSmall(String value) { TextView t = text(value, 16); t.setTextColor(Color.WHITE); t.setTypeface(Typeface.DEFAULT_BOLD); return t; }
     private EditText field(String hint, String value, boolean secret) { EditText e = new EditText(this); e.setHint(hint); e.setText(value); e.setSingleLine(); e.setTextColor(Color.WHITE); e.setHintTextColor(Color.rgb(130, 145, 170)); if (secret) e.setInputType(129); return e; }
+    private View labeledField(String label, EditText field) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView labelView = sectionLabel(label);
+        row.addView(labelView, new LinearLayout.LayoutParams(dp(112), -2));
+        row.addView(field, new LinearLayout.LayoutParams(0, -2, 1));
+        return row;
+    }
     private SharedPreferences p() { return getSharedPreferences("ZazzPrefs", Context.MODE_PRIVATE); }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private void toast(String value) { MacToast.show(this, value, false); }
@@ -907,7 +1183,7 @@ public final class MainActivity extends AppCompatActivity {
     @Override protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data); if (result != RESULT_OK || data == null) return;
         try {
-            if (code == EXPORT_CATALOG) try (OutputStream out = getContentResolver().openOutputStream(data.getData())) { ZazzArchive.exportManifest(node == null ? Collections.emptyList() : node.hostedFiles(), "ZazzProxy", out); }
+            if (code == EXPORT_CATALOG) try (OutputStream out = getContentResolver().openOutputStream(data.getData())) { ZazzArchive.exportManifest(node == null ? Collections.emptyList() : node.hostedFiles(), "ZazzProxy", ZazzArchive.profileAvatar(this, true), out); }
             else if (code == EXPORT_SETTINGS) try (OutputStream out = getContentResolver().openOutputStream(data.getData())) { ZazzArchive.exportSettings(this, out); }
             else if (code == IMPORT_SETTINGS) try (InputStream in = getContentResolver().openInputStream(data.getData())) { ZazzArchive.importSettings(this, in); }
             else if (code == IMPORT_CATALOG) try (InputStream in = getContentResolver().openInputStream(data.getData())) { MacToast.show(this, "Imported " + ZazzArchive.importManifest(in).size() + " files", true); }
